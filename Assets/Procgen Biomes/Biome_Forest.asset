@@ -1,0 +1,27 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b2e6f85c11a6c4f4d8baafcea53475d5, type: 3}
+  m_Name: Biome_Forest
+  m_EditorClassIdentifier: Assembly-CSharp::BiomeData
+  biomeName: Forest
+  groundMaterial: {fileID: 2100000, guid: 0c42aaf3f2d526f4b9751ddde57bc73f, type: 2}
+  treePrefabs:
+  - {fileID: 919132149155446097, guid: b32d6a4eef47c524ea9778bb8b6109c4, type: 3}
+  rockPrefabs:
+  - {fileID: 919132149155446097, guid: d74aff6b5ff331e4fbeff2c6ee6abd85, type: 3}
+  bushPrefabs:
+  - {fileID: 919132149155446097, guid: 937039ee4c2afba40b7f60a1296979ef, type: 3}
+  largeAmpMultiplier: 1
+  ridgeAmpMultiplier: 1
+  detailAmpMultiplier: 1
+  poiPrefabs:
+  - {fileID: 919132149155446097, guid: 9962c23c3397e974e8a177c63dd7a880, type: 3}
