@@ -6,137 +6,105 @@ using UnityEngine;
 using UnityEditor;
 #endif
 
-/// <summary>
-/// MVP Map Generator (fixed 10x10):
-/// - Spawns a 10x10 grid of ground tiles in X/Z (horizontal grid)
-/// - Adds elevation via Perlin / Fractal Perlin (hills)
-/// - Auto-detects tile footprint (width/depth/thickness) from groundTilePrefab so tiles don't overlap
-/// - Spawns per-tile loot (jars + chests) with neighbor bias (3..5)
-/// - Spawns per-tile environment (trees/rocks/bushes required; dirt/grass optional)
-/// - Improved spawn randomness:
-///     * Per-tile RNG (prevents repeating “same random” patterns across tiles)
-///     * Per-tile jitter (each tile has a different spawn "center")
-///     * Minimum separation within a tile to avoid stacking/clumping
-/// - Keeps hierarchy clean (Tiles / Environment / Loot)
-/// </summary>
 public class MapGenerator : MonoBehaviour
 {
     private const int MAP_SIZE = 10;
 
-    [Header("Map Dimensions (forced to 10x10 at runtime)")]
+    [Header("Map Dimensions (forced 10x10 at runtime)")]
     [Min(1)] public int width = MAP_SIZE;
     [Min(1)] public int height = MAP_SIZE;
 
     [Header("Ground Tile")]
-    [Tooltip("Prefab used as the ground tile.")]
     public GameObject groundTilePrefab;
-
-    [Tooltip("Optional material applied to the ground tile renderer (sharedMaterial).")]
     public Material groundMaterial;
 
     [Header("Tile Spacing (IMPORTANT)")]
-    [Tooltip("If ON, we measure the prefab bounds and use that as spacing so tiles don't overlap (recommended).")]
     public bool autoSpacingFromPrefab = true;
-
-    [Tooltip("Extra spacing multiplier. 1 = flush tiles, 1.05 adds a small gap.")]
+    [Tooltip("Multiplies measured tile size. Use 1.0 normally.")]
     public float spacingMultiplier = 1.0f;
 
-    [Tooltip("If your prefab pivot is centered (typical cube), we add half thickness so it sits correctly. If pivot is already at bottom, turn this OFF.")]
+    [Tooltip("Unity Plane pivot is centered (recommended ON for Plane).")]
     public bool tilePivotIsCentered = true;
+
+    [Header("Terrain Shape (Mega Bonk-ish)")]
+    public float largeScale = 0.08f;
+    public float largeAmp = 12f;
+
+    public float ridgeScale = 0.17f;
+    public float ridgeAmp = 4f;
+
+    public float detailScale = 0.55f;
+    public float detailAmp = 0.6f;
+
+    [Range(0f, 1f)] public float valleyStrength = 0.70f;
+    public float valleyScale = 0.05f;
+
+    [Header("Optional Domain Warp")]
+    public bool useDomainWarp = true;
+    public float warpScale = 0.12f;
+    public float warpStrength = 2.5f;
+
+    [Header("Optional stepping (0 = smooth)")]
+    public float heightStep = 0f;
+
+    [Header("REAL SLOPES (recommended)")]
+    public bool deformTilesToCreateSlopes = true;
+    public bool recalcNormalsAfterDeform = true;
+
+    [Header("Ground Placement (fix floating objects)")]
+    public bool useRaycastGrounding = true;
+
+    [Tooltip("Set this to ONLY your Ground layer for best results.")]
+    public LayerMask groundLayerMask = ~0;
+
+    public float groundRaycastStartHeight = 300f;
+    public float groundExtraOffset = 0.0f;
+
+    [Header("Auto Pivot Correction (trees with wrong pivots)")]
+    public bool autoPivotCorrection = true;
 
     [Header("Seed (repeatable runs)")]
     public bool useRandomSeed = true;
     public int seed = 12345;
 
-    [Header("Height / Terrain Noise (Hills)")]
-    [Tooltip("Noise scale: higher = more frequent hills on a small map.")]
-    public float heightNoiseScale = 0.25f;
-
-    [Tooltip("Max height amplitude in world units. Increase for stronger hills.")]
-    public float heightAmplitude = 0.8f;
-
-    [Tooltip("Optional stepping of height (0 = none). Keep 0 for smooth hills.")]
-    public float heightStep = 0f;
-
-    [Header("Fractal Noise (recommended for nicer hills)")]
-    [Tooltip("If ON, uses multiple Perlin octaves to create richer hills.")]
-    public bool useFractalNoise = true;
-
-    [Range(1, 8)] public int octaves = 4;
-    [Range(0.3f, 0.8f)] public float persistence = 0.5f;
-    [Range(1.5f, 3.5f)] public float lacunarity = 2.0f;
-
-    [Header("Chunk Slope Feature (optional)")]
-    [Tooltip("Chunk size in tiles.")]
-    public int chunkSize = 8;
-
-    [Range(0f, 1f)]
-    [Tooltip("Chance each chunk gets a slope feature.")]
-    public float slopeFeatureChancePerChunk = 0.25f;
-
-    [Tooltip("Strength of slope feature (world units).")]
-    public float slopeFeatureStrength = 0.4f;
-
-    [Header("Loot: Jars (XP/Gold)")]
-    public GameObject[] xpJarPrefabs;
-    public GameObject[] goldJarPrefabs;
-    public float jarScatterRadius = 0.7f;
-    public float jarYOffset = 0.05f;
-    public Vector2 jarScaleRange = new Vector2(0.9f, 1.1f);
-
-    [Header("Loot: Chests")]
-    public GameObject[] chestPrefabs;
-    public float chestScatterRadius = 0.6f;
-    public float chestYOffset = 0.05f;
-    public Vector2 chestScaleRange = new Vector2(0.95f, 1.05f);
-
-    [Header("Neighbor Bias (applies to BOTH jars and chests)")]
-    [Range(0f, 1f)] public float neighborFiveChance = 0.10f;
-    [Range(0f, 1f)] public float neighborThreeChance = 0.80f;
-    // remaining probability => 4
-
-    [Header("Environment (trees/rocks/bushes required; dirt/grass optional)")]
+    [Header("Environment")]
     public GameObject[] treePrefabs;
     public GameObject[] rockPrefabs;
     public GameObject[] bushPrefabs;
-    public GameObject[] dirtPatchPrefabs;   // optional
-    public GameObject[] grassPatchPrefabs;  // optional
 
-    [Min(0)]
-    [Tooltip("Minimum number of environment spawns per tile.")]
-    public int envSpawnsPerTileMin = 6;
+    [Min(0)] public int envSpawnsPerTileMin = 6;
 
-    public float envScatterRadius = 0.9f;
-    public float envYOffset = 0.0f;
-    public Vector2 envScaleRange = new Vector2(0.9f, 1.2f);
+    [Header("Spawn Randomness")]
+    [Tooltip("Fraction of HALF tile size if Use Normalized Radii is ON")]
+    public float envScatterRadius = 0.45f;
 
-    [Header("Spawn Randomness Improvements")]
-    [Tooltip("Shifts each tile's spawn center randomly so patterns don't repeat across the grid.")]
-    public float perTileJitterRadius = 0.5f;
+    [Tooltip("Fraction of HALF tile size if Use Normalized Radii is ON")]
+    public float perTileJitterRadius = 0.18f;
 
-    [Tooltip("Minimum distance between spawned objects within the same tile (prevents stacking/clumping).")]
-    public float minSeparationInTile = 0.35f;
+    [Tooltip("Fraction of HALF tile size if Use Normalized Radii is ON")]
+    public float minSeparationInTile = 0.10f;
 
-    [Tooltip("Attempts to find a non-overlapping spot before placing anyway.")]
     public int placementAttempts = 12;
 
-    // Generated data / runtime
-    private Transform _root;
-    private Transform _tilesRoot;
-    private Transform _envRoot;
-    private Transform _lootRoot;
+    [Header("Scale Fix (recommended for Unity Plane 10x10)")]
+    public bool useNormalizedRadii = true;
 
-    private float[,] _heights;
-    private System.Random _rng; // global RNG for map-level decisions (heights/chunks/etc)
+    // runtime
+    private Transform _root, _tilesRoot, _envRoot;
+    private System.Random _rng;
 
-    // measured from prefab
-    private float _tileFootprintX = 2f;
-    private float _tileFootprintZ = 2f;
-    private float _tileThicknessY = 0.2f;
+    // measured tile
+    private float _tileFootprintX = 10f;
+    private float _tileFootprintZ = 10f;
+    private float _tileThicknessY = 0.0f;
 
-    // offsets for noise
-    private float _offX;
-    private float _offZ;
+    // noise offsets
+    private float _offX, _offZ;
+
+    // effective radii
+    private float _envRadiusWorld;
+    private float _jitterRadiusWorld;
+    private float _minSepWorld;
 
     [ContextMenu("Generate")]
     public void Generate()
@@ -144,17 +112,9 @@ public class MapGenerator : MonoBehaviour
         width = MAP_SIZE;
         height = MAP_SIZE;
 
-        chunkSize = Mathf.Clamp(chunkSize, 1, MAP_SIZE);
-
         if (groundTilePrefab == null)
         {
-            Debug.LogError("MapGenerator missing groundTilePrefab.");
-            return;
-        }
-
-        if (!HasAtLeastOne(treePrefabs) || !HasAtLeastOne(rockPrefabs) || !HasAtLeastOne(bushPrefabs))
-        {
-            Debug.LogError("Missing environment prefabs. Assign at least one prefab for: trees, rocks, bushes. Dirt/grass are optional.");
+            Debug.LogError("MapGenerator: groundTilePrefab is missing.");
             return;
         }
 
@@ -168,66 +128,42 @@ public class MapGenerator : MonoBehaviour
         _root = new GameObject($"GeneratedMap_10x10_seed_{seed}").transform;
         _tilesRoot = new GameObject("Tiles").transform; _tilesRoot.SetParent(_root, false);
         _envRoot = new GameObject("Environment").transform; _envRoot.SetParent(_root, false);
-        _lootRoot = new GameObject("Loot").transform; _lootRoot.SetParent(_root, false);
 
-        MeasureGroundPrefab();
-
-        _heights = new float[width, height];
+        MeasureGroundPrefab();     // ✅ FIXED (respects prefab scale)
+        ComputeEffectiveRadii();
 
         _offX = NextFloat(_rng, -10000f, 10000f);
         _offZ = NextFloat(_rng, -10000f, 10000f);
 
-        BuildHeightmap();
-        ApplyChunkSlopeFeatures();
-
         SpawnTiles();
         SpawnEnvironmentEveryTile();
-        SpawnLootEveryTile();
 
-        Debug.Log($"Generated 10x10 grid with seed {seed}. Tile spacing: {_tileFootprintX:F2} x {_tileFootprintZ:F2}");
+        Debug.Log($"Generated map seed={seed} spacing=({_tileFootprintX:F2},{_tileFootprintZ:F2}) deform={deformTilesToCreateSlopes}");
     }
 
     // ----------------------------
-    // Per-tile RNG (prevents repeating patterns)
-    // ----------------------------
-    private System.Random MakeTileRng(int x, int z, int salt)
-    {
-        unchecked
-        {
-            int h = seed;
-            h = h * 486187739 + x * 73856093;
-            h = h * 486187739 + z * 19349663;
-            h = h * 486187739 + salt * 83492791;
-            return new System.Random(h);
-        }
-    }
-
-    // RNG helpers (tile or global)
-    private float NextFloat01(System.Random r) => (float)r.NextDouble();
-    private bool NextBool(System.Random r) => r.Next(0, 2) == 0;
-    private float NextFloat(System.Random r, float min, float max) => min + NextFloat01(r) * (max - min);
-    private int NextInt(System.Random r, int minInclusive, int maxExclusive) => r.Next(minInclusive, maxExclusive);
-
-    // ----------------------------
-    // Prefab measurement & spacing
+    // Measurement (FIXED)
     // ----------------------------
     private void MeasureGroundPrefab()
     {
         GameObject sample = Instantiate(groundTilePrefab);
         sample.name = "__MEASURE_SAMPLE__";
         sample.hideFlags = HideFlags.HideAndDontSave;
-        sample.SetActive(false);
+
+        sample.SetActive(true);
         sample.transform.position = Vector3.zero;
         sample.transform.rotation = Quaternion.identity;
-        sample.transform.localScale = Vector3.one;
 
-        Bounds b;
-        if (!TryGetWorldBounds(sample, out b))
+        // ✅ IMPORTANT FIX:
+        // Do NOT force Vector3.one. Respect prefab scale or you will mis-measure spacing.
+        sample.transform.localScale = groundTilePrefab.transform.localScale;
+
+        if (!TryGetWorldBounds(sample, out Bounds b))
         {
-            Debug.LogWarning("Could not measure groundTilePrefab bounds. Falling back to 2x2 footprint.");
-            _tileFootprintX = 2f;
-            _tileFootprintZ = 2f;
-            _tileThicknessY = 0.2f;
+            Debug.LogWarning("Could not measure groundTilePrefab bounds. Falling back to Plane-ish 10x10.");
+            _tileFootprintX = 10f * spacingMultiplier;
+            _tileFootprintZ = 10f * spacingMultiplier;
+            _tileThicknessY = 0.01f;
         }
         else
         {
@@ -241,9 +177,6 @@ public class MapGenerator : MonoBehaviour
 #else
         Destroy(sample);
 #endif
-
-        if (!autoSpacingFromPrefab)
-            Debug.LogWarning("autoSpacingFromPrefab is OFF. If your tiles overlap, turn it ON. Default Unity Plane is 10x10 units.");
     }
 
     private bool TryGetWorldBounds(GameObject go, out Bounds bounds)
@@ -263,119 +196,129 @@ public class MapGenerator : MonoBehaviour
     }
 
     // ----------------------------
-    // Heightmap / Hills
+    // Noise / height
     // ----------------------------
-    private void BuildHeightmap()
+    private float SampleHeightGrid(float gx, float gz)
     {
-        for (int z = 0; z < height; z++)
+        if (useDomainWarp)
         {
-            for (int x = 0; x < width; x++)
-            {
-                float n = useFractalNoise
-                    ? FractalPerlin(_offX, _offZ, x, z)
-                    : Mathf.PerlinNoise(_offX + x * heightNoiseScale, _offZ + z * heightNoiseScale);
-
-                float h = (n - 0.5f) * 2f * heightAmplitude;
-
-                if (heightStep > 0.0001f)
-                    h = Mathf.Round(h / heightStep) * heightStep;
-
-                _heights[x, z] = h;
-            }
+            float wx = (Mathf.PerlinNoise(_offX + gx * warpScale, _offZ + gz * warpScale) - 0.5f) * 2f;
+            float wz = (Mathf.PerlinNoise(_offX + 999f + gx * warpScale, _offZ + 999f + gz * warpScale) - 0.5f) * 2f;
+            gx += wx * warpStrength;
+            gz += wz * warpStrength;
         }
+
+        float large = Mathf.PerlinNoise(_offX + gx * largeScale, _offZ + gz * largeScale);
+        float hLarge = (large - 0.5f) * 2f * largeAmp;
+
+        float ridgeBase = Mathf.PerlinNoise(_offX + 2000f + gx * ridgeScale, _offZ + 2000f + gz * ridgeScale);
+        float ridge = 1f - Mathf.Abs(ridgeBase * 2f - 1f);
+        float hRidge = (ridge - 0.5f) * 2f * ridgeAmp;
+
+        float detail = Mathf.PerlinNoise(_offX + 4000f + gx * detailScale, _offZ + 4000f + gz * detailScale);
+        float hDetail = (detail - 0.5f) * 2f * detailAmp;
+
+        float valleyMap = Mathf.PerlinNoise(_offX + 6000f + gx * valleyScale, _offZ + 6000f + gz * valleyScale);
+        float valley = Mathf.Pow(valleyMap, 2.2f);
+        float valleyDrop = Mathf.Lerp(0f, largeAmp * 0.9f, valleyStrength) * (1f - valley);
+
+        float h = hLarge + hRidge + hDetail - valleyDrop;
+
+        if (heightStep > 0.0001f)
+            h = Mathf.Round(h / heightStep) * heightStep;
+        
+        float flatStart = 3f;     // start flattening around this height (world units)
+        float flatRange = 6f;     // how wide the flatten band is
+        float flatStrength = 0.6f; // 0..1 how strong the flattening is
+
+        float t = Mathf.InverseLerp(flatStart, flatStart + flatRange, Mathf.Abs(h));
+        float flatten = Mathf.SmoothStep(0f, 1f, t);
+        h = Mathf.Lerp(h, Mathf.Sign(h) * flatStart, flatStrength * (1f - flatten));
+
+        return h;
     }
 
-    private float FractalPerlin(float offX, float offZ, int x, int z)
+    private void WorldToGrid(float wx, float wz, out float gx, out float gz)
     {
-        float amp = 1f;
-        float freq = 1f;
-        float sum = 0f;
-        float norm = 0f;
+        float spacingX = autoSpacingFromPrefab ? _tileFootprintX : 10f;
+        float spacingZ = autoSpacingFromPrefab ? _tileFootprintZ : 10f;
 
-        for (int i = 0; i < octaves; i++)
-        {
-            float nx = offX + (x * heightNoiseScale * freq);
-            float nz = offZ + (z * heightNoiseScale * freq);
-
-            float p = Mathf.PerlinNoise(nx, nz);
-            sum += p * amp;
-            norm += amp;
-
-            amp *= persistence;
-            freq *= lacunarity;
-        }
-
-        return sum / Mathf.Max(0.0001f, norm);
+        gx = wx / Mathf.Max(0.0001f, spacingX);
+        gz = wz / Mathf.Max(0.0001f, spacingZ);
     }
 
-    private void ApplyChunkSlopeFeatures()
+    private float SampleHeightWorld(float wx, float wz)
     {
-        int chunksX = Mathf.CeilToInt(width / (float)chunkSize);
-        int chunksZ = Mathf.CeilToInt(height / (float)chunkSize);
-
-        for (int cz = 0; cz < chunksZ; cz++)
-        {
-            for (int cx = 0; cx < chunksX; cx++)
-            {
-                if (NextFloat01(_rng) > slopeFeatureChancePerChunk)
-                    continue;
-
-                bool slopeAlongX = NextBool(_rng);
-
-                int startX = cx * chunkSize;
-                int startZ = cz * chunkSize;
-                int endX = Mathf.Min(startX + chunkSize, width);
-                int endZ = Mathf.Min(startZ + chunkSize, height);
-
-                for (int z = startZ; z < endZ; z++)
-                {
-                    for (int x = startX; x < endX; x++)
-                    {
-                        float t = slopeAlongX
-                            ? (x - startX) / Mathf.Max(1f, (endX - startX - 1f))
-                            : (z - startZ) / Mathf.Max(1f, (endZ - startZ - 1f));
-
-                        float tri = 1f - Mathf.Abs(2f * t - 1f);
-                        float delta = (tri - 0.5f) * 2f * slopeFeatureStrength;
-
-                        _heights[x, z] += delta;
-
-                        if (heightStep > 0.0001f)
-                            _heights[x, z] = Mathf.Round(_heights[x, z] / heightStep) * heightStep;
-                    }
-                }
-            }
-        }
+        WorldToGrid(wx, wz, out float gx, out float gz);
+        return SampleHeightGrid(gx, gz);
     }
 
     // ----------------------------
-    // Tile spawning
+    // Tiles
     // ----------------------------
     private void SpawnTiles()
     {
+        float spacingX = autoSpacingFromPrefab ? _tileFootprintX : 10f;
+        float spacingZ = autoSpacingFromPrefab ? _tileFootprintZ : 10f;
+
+        float yOffset = tilePivotIsCentered ? (_tileThicknessY * 0.5f) : 0f;
+
         for (int z = 0; z < height; z++)
         {
             for (int x = 0; x < width; x++)
             {
-                Vector3 pos = GridToWorld(x, z, _heights[x, z]);
-                var tile = Instantiate(groundTilePrefab, pos, Quaternion.identity, _tilesRoot);
+                Vector3 basePos = new Vector3(x * spacingX, yOffset, z * spacingZ);
+
+                var tile = Instantiate(groundTilePrefab, basePos, Quaternion.identity, _tilesRoot);
                 TryApplyGroundMaterial(tile, groundMaterial);
+
+                if (deformTilesToCreateSlopes)
+                    DeformTileMesh(tile, x, z);
             }
         }
     }
 
-    private Vector3 GridToWorld(int x, int z, float y)
+    private void DeformTileMesh(GameObject tile, int tileX, int tileZ)
     {
-        float spacingX = autoSpacingFromPrefab ? _tileFootprintX : 2f;
-        float spacingZ = autoSpacingFromPrefab ? _tileFootprintZ : 2f;
+        var mf = tile.GetComponentInChildren<MeshFilter>();
+        if (mf == null || mf.sharedMesh == null) return;
 
-        float yOffset = tilePivotIsCentered ? (_tileThicknessY * 0.5f) : 0f;
+        Mesh mesh = mf.mesh; // instance
+        Vector3[] verts = mesh.vertices;
 
-        return new Vector3(
-            x * spacingX,
-            y + yOffset,
-            z * spacingZ
-        );
+        Bounds b = mesh.bounds;
+        float minX = b.min.x;
+        float minZ = b.min.z;
+        float sizeX = Mathf.Max(0.0001f, b.size.x);
+        float sizeZ = Mathf.Max(0.0001f, b.size.z);
+
+        for (int i = 0; i < verts.Length; i++)
+        {
+            Vector3 v = verts[i];
+
+            float u = (v.x - minX) / sizeX; // 0..1
+            float w = (v.z - minZ) / sizeZ; // 0..1
+
+            float gx = tileX + (u - 0.5f);
+            float gz = tileZ + (w - 0.5f);
+
+            v.y = SampleHeightGrid(gx, gz);
+            verts[i] = v;
+        }
+
+        mesh.vertices = verts;
+
+        if (recalcNormalsAfterDeform)
+        {
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+        }
+
+        // ✅ FIXED collider refresh (correct object, correct condition)
+        var mc = mf.GetComponent<MeshCollider>();
+        if (mc == null) mc = mf.gameObject.AddComponent<MeshCollider>();
+        mc.sharedMesh = null;
+        mc.sharedMesh = mesh;
     }
 
     private void TryApplyGroundMaterial(GameObject tile, Material mat)
@@ -386,19 +329,157 @@ public class MapGenerator : MonoBehaviour
     }
 
     // ----------------------------
-    // Random placement helpers (tile RNG aware)
+    // Environment
     // ----------------------------
+    private void SpawnEnvironmentEveryTile()
+    {
+        if (!HasAtLeastOne(treePrefabs) && !HasAtLeastOne(rockPrefabs) && !HasAtLeastOne(bushPrefabs))
+            return;
+
+        int perTile = Mathf.Max(envSpawnsPerTileMin, 0);
+
+        float spacingX = autoSpacingFromPrefab ? _tileFootprintX : 10f;
+        float spacingZ = autoSpacingFromPrefab ? _tileFootprintZ : 10f;
+
+        for (int z = 0; z < height; z++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                var tileRng = MakeTileRng(x, z, 101);
+
+                Vector3 tileBase = new Vector3(x * spacingX, 0f, z * spacingZ);
+                Vector3 center = GetTileSpawnCenter(tileBase, tileRng);
+
+                var used = new List<Vector2>(perTile);
+
+                for (int i = 0; i < perTile; i++)
+                {
+                    GameObject prefab = PickEnvPrefab(tileRng);
+                    if (prefab == null) break;
+
+                    Vector2 offset = RandomPointWithMinSeparation(tileRng, _envRadiusWorld, used, _minSepWorld, placementAttempts);
+                    Vector3 pos = center + new Vector3(offset.x, 0f, offset.y);
+                    pos = SnapToTerrainY(pos, 0f);
+
+                    var go = Instantiate(prefab, pos, Quaternion.Euler(0f, NextFloat(tileRng, 0f, 360f), 0f), _envRoot);
+
+                    if (autoPivotCorrection)
+                        ApplyAutoPivotCorrection(go, pos.y);
+                }
+            }
+        }
+    }
+
+    private GameObject PickEnvPrefab(System.Random r)
+    {
+        // simple weighted-ish choice
+        int options = 0;
+        if (HasAtLeastOne(treePrefabs)) options++;
+        if (HasAtLeastOne(rockPrefabs)) options++;
+        if (HasAtLeastOne(bushPrefabs)) options++;
+        if (options == 0) return null;
+
+        int pick = r.Next(0, options);
+        if (HasAtLeastOne(treePrefabs))
+        {
+            if (pick == 0) return treePrefabs[r.Next(0, treePrefabs.Length)];
+            pick--;
+        }
+        if (HasAtLeastOne(rockPrefabs))
+        {
+            if (pick == 0) return rockPrefabs[r.Next(0, rockPrefabs.Length)];
+            pick--;
+        }
+        return HasAtLeastOne(bushPrefabs) ? bushPrefabs[r.Next(0, bushPrefabs.Length)] : null;
+    }
+
+    private void ApplyAutoPivotCorrection(GameObject go, float groundY)
+    {
+        var rends = go.GetComponentsInChildren<Renderer>();
+        if (rends == null || rends.Length == 0) return;
+
+        Bounds b = rends[0].bounds;
+        for (int i = 1; i < rends.Length; i++)
+            b.Encapsulate(rends[i].bounds);
+
+        float bottomY = b.min.y;
+        float delta = groundY - bottomY;
+        go.transform.position += new Vector3(0f, delta, 0f);
+    }
+
+    private Vector3 SnapToTerrainY(Vector3 worldPos, float extraYOffset)
+    {
+        if (!useRaycastGrounding)
+        {
+            float h = SampleHeightWorld(worldPos.x, worldPos.z);
+            worldPos.y = h + extraYOffset + groundExtraOffset;
+            return worldPos;
+        }
+
+        Vector3 rayStart = new Vector3(worldPos.x, groundRaycastStartHeight, worldPos.z);
+
+        // IMPORTANT: if your groundLayerMask includes trees/rocks colliders, raycast may hit them first.
+        if (Physics.Raycast(rayStart, Vector3.down, out RaycastHit hit, groundRaycastStartHeight * 2f, groundLayerMask))
+        {
+            worldPos.y = hit.point.y + extraYOffset + groundExtraOffset;
+            return worldPos;
+        }
+
+        float fallback = SampleHeightWorld(worldPos.x, worldPos.z);
+        worldPos.y = fallback + extraYOffset + groundExtraOffset;
+        return worldPos;
+    }
+
+    // ----------------------------
+    // Random helpers
+    // ----------------------------
+    private void ComputeEffectiveRadii()
+    {
+        float halfMin = 0.5f * Mathf.Min(_tileFootprintX, _tileFootprintZ);
+
+        if (useNormalizedRadii)
+        {
+            _envRadiusWorld = envScatterRadius * halfMin;
+            _jitterRadiusWorld = perTileJitterRadius * halfMin;
+            _minSepWorld = minSeparationInTile * halfMin;
+        }
+        else
+        {
+            _envRadiusWorld = envScatterRadius;
+            _jitterRadiusWorld = perTileJitterRadius;
+            _minSepWorld = minSeparationInTile;
+        }
+
+        _envRadiusWorld = Mathf.Max(0.01f, _envRadiusWorld);
+        _jitterRadiusWorld = Mathf.Max(0f, _jitterRadiusWorld);
+        _minSepWorld = Mathf.Max(0f, _minSepWorld);
+    }
+
+    private System.Random MakeTileRng(int x, int z, int salt)
+    {
+        unchecked
+        {
+            int h = seed;
+            h = h * 486187739 + x * 73856093;
+            h = h * 486187739 + z * 19349663;
+            h = h * 486187739 + salt * 83492791;
+            return new System.Random(h);
+        }
+    }
+
+    private float NextFloat(System.Random r, float min, float max) => min + (float)r.NextDouble() * (max - min);
+
     private Vector2 RandomInsideCircle(System.Random r, float radius)
     {
         float ang = NextFloat(r, 0f, Mathf.PI * 2f);
-        float rr = Mathf.Sqrt(NextFloat01(r)) * radius;
+        float rr = Mathf.Sqrt((float)r.NextDouble()) * radius;
         return new Vector2(Mathf.Cos(ang) * rr, Mathf.Sin(ang) * rr);
     }
 
-    private Vector3 GetTileSpawnCenter(Vector3 tileBase, System.Random tileRng)
+    private Vector3 GetTileSpawnCenter(Vector3 tileBaseWorld, System.Random tileRng)
     {
-        Vector2 jitter = RandomInsideCircle(tileRng, perTileJitterRadius);
-        return tileBase + new Vector3(jitter.x, 0f, jitter.y);
+        Vector2 jitter = RandomInsideCircle(tileRng, _jitterRadiusWorld);
+        return tileBaseWorld + new Vector3(jitter.x, 0f, jitter.y);
     }
 
     private Vector2 RandomPointWithMinSeparation(System.Random r, float radius, List<Vector2> used, float minDist, int attempts)
@@ -406,22 +487,14 @@ public class MapGenerator : MonoBehaviour
         for (int i = 0; i < attempts; i++)
         {
             Vector2 p = RandomInsideCircle(r, radius);
-
             bool ok = true;
+
             for (int j = 0; j < used.Count; j++)
             {
-                if (Vector2.Distance(p, used[j]) < minDist)
-                {
-                    ok = false;
-                    break;
-                }
+                if (Vector2.Distance(p, used[j]) < minDist) { ok = false; break; }
             }
 
-            if (ok)
-            {
-                used.Add(p);
-                return p;
-            }
+            if (ok) { used.Add(p); return p; }
         }
 
         Vector2 fallback = RandomInsideCircle(r, radius);
@@ -429,192 +502,6 @@ public class MapGenerator : MonoBehaviour
         return fallback;
     }
 
-    // ----------------------------
-    // Environment spawning (dirt/grass optional) - per-tile RNG + jitter + separation
-    // ----------------------------
-    private void SpawnEnvironmentEveryTile()
-    {
-        int perTile = Mathf.Max(envSpawnsPerTileMin, 0);
-
-        var categories = new List<GameObject[]>();
-        if (HasAtLeastOne(treePrefabs)) categories.Add(treePrefabs);
-        if (HasAtLeastOne(rockPrefabs)) categories.Add(rockPrefabs);
-        if (HasAtLeastOne(bushPrefabs)) categories.Add(bushPrefabs);
-        if (HasAtLeastOne(dirtPatchPrefabs)) categories.Add(dirtPatchPrefabs);
-        if (HasAtLeastOne(grassPatchPrefabs)) categories.Add(grassPatchPrefabs);
-
-        if (categories.Count == 0 || perTile <= 0) return;
-
-        for (int z = 0; z < height; z++)
-        {
-            for (int x = 0; x < width; x++)
-            {
-                // Per-tile RNG removes repeating patterns.
-                var tileRng = MakeTileRng(x, z, 101);
-
-                Vector3 tileBase = GridToWorld(x, z, _heights[x, z]);
-                Vector3 center = GetTileSpawnCenter(tileBase, tileRng);
-
-                // Keep objects from stacking on top of each other inside this tile
-                var used = new List<Vector2>(Mathf.Max(perTile, categories.Count));
-
-                // One of each category
-                for (int i = 0; i < categories.Count; i++)
-                    SpawnEnvFromCategory(categories[i], center, used, tileRng);
-
-                int spawned = categories.Count;
-
-                // Fill remaining randomly
-                while (spawned < perTile)
-                {
-                    var chosen = categories[NextInt(tileRng, 0, categories.Count)];
-                    SpawnEnvFromCategory(chosen, center, used, tileRng);
-                    spawned++;
-                }
-            }
-        }
-    }
-
-    private void SpawnEnvFromCategory(GameObject[] prefabs, Vector3 center, List<Vector2> used, System.Random tileRng)
-    {
-        if (!HasAtLeastOne(prefabs)) return;
-
-        GameObject prefab = prefabs[NextInt(tileRng, 0, prefabs.Length)];
-
-        Vector2 offset = RandomPointWithMinSeparation(
-            tileRng,
-            envScatterRadius,
-            used,
-            minSeparationInTile,
-            placementAttempts
-        );
-
-        Vector3 pos = center + new Vector3(offset.x, envYOffset, offset.y);
-
-        var go = Instantiate(prefab, pos, Quaternion.Euler(0f, NextFloat(tileRng, 0f, 360f), 0f), _envRoot);
-
-        float s = NextFloat(tileRng, envScaleRange.x, envScaleRange.y);
-        go.transform.localScale *= s;
-    }
-
-    // ----------------------------
-    // Loot spawning (per tile) with neighbor bias - per-tile RNG + jitter + separation
-    // ----------------------------
-    private void SpawnLootEveryTile()
-    {
-        int[,] jarCounts = new int[width, height];
-        int[,] chestCounts = new int[width, height];
-
-        // Decide counts (global RNG, stable scan order)
-        for (int z = 0; z < height; z++)
-        {
-            for (int x = 0; x < width; x++)
-            {
-                bool nearFiveJars = HasPriorNeighborWithFive(jarCounts, x, z);
-                bool nearFiveChests = HasPriorNeighborWithFive(chestCounts, x, z);
-
-                jarCounts[x, z] = DecideCount3to5(nearFiveJars);
-                chestCounts[x, z] = DecideCount3to5(nearFiveChests);
-            }
-        }
-
-        // Spawn using per-tile RNG so placement doesn't repeat
-        for (int z = 0; z < height; z++)
-        {
-            for (int x = 0; x < width; x++)
-            {
-                var tileRng = MakeTileRng(x, z, 202); // different salt from env
-
-                Vector3 tileBase = GridToWorld(x, z, _heights[x, z]);
-                Vector3 center = GetTileSpawnCenter(tileBase, tileRng);
-
-                var used = new List<Vector2>(12);
-
-                SpawnJarsOnTile(center, used, jarCounts[x, z], tileRng);
-                SpawnChestsOnTile(center, used, chestCounts[x, z], tileRng);
-            }
-        }
-    }
-
-    private int DecideCount3to5(bool hasNeighborWithFive)
-    {
-        if (!hasNeighborWithFive)
-            return NextInt(_rng, 3, 6);
-
-        float r = NextFloat01(_rng);
-        if (r < neighborThreeChance) return 3;
-        if (r < neighborThreeChance + neighborFiveChance) return 5;
-        return 4;
-    }
-
-    private bool HasPriorNeighborWithFive(int[,] counts, int x, int z)
-    {
-        if (x - 1 >= 0 && counts[x - 1, z] == 5) return true;
-        if (z - 1 >= 0 && counts[x, z - 1] == 5) return true;
-        if (x - 1 >= 0 && z - 1 >= 0 && counts[x - 1, z - 1] == 5) return true;
-        if (x + 1 < width && z - 1 >= 0 && counts[x + 1, z - 1] == 5) return true;
-        return false;
-    }
-
-    private void SpawnJarsOnTile(Vector3 center, List<Vector2> used, int count, System.Random tileRng)
-    {
-        bool hasXp = HasAtLeastOne(xpJarPrefabs);
-        bool hasGold = HasAtLeastOne(goldJarPrefabs);
-        if (!hasXp && !hasGold) return;
-
-        count = Mathf.Clamp(count, 3, 5);
-
-        for (int i = 0; i < count; i++)
-        {
-            bool spawnXp = hasXp && (!hasGold || NextBool(tileRng));
-            GameObject[] pool = spawnXp ? xpJarPrefabs : goldJarPrefabs;
-            GameObject prefab = pool[NextInt(tileRng, 0, pool.Length)];
-
-            Vector2 offset = RandomPointWithMinSeparation(
-                tileRng,
-                jarScatterRadius,
-                used,
-                minSeparationInTile * 0.8f,
-                placementAttempts
-            );
-
-            Vector3 pos = center + new Vector3(offset.x, jarYOffset, offset.y);
-
-            var go = Instantiate(prefab, pos, Quaternion.Euler(0f, NextFloat(tileRng, 0f, 360f), 0f), _lootRoot);
-            float s = NextFloat(tileRng, jarScaleRange.x, jarScaleRange.y);
-            go.transform.localScale *= s;
-        }
-    }
-
-    private void SpawnChestsOnTile(Vector3 center, List<Vector2> used, int count, System.Random tileRng)
-    {
-        if (!HasAtLeastOne(chestPrefabs)) return;
-
-        count = Mathf.Clamp(count, 3, 5);
-
-        for (int i = 0; i < count; i++)
-        {
-            GameObject prefab = chestPrefabs[NextInt(tileRng, 0, chestPrefabs.Length)];
-
-            Vector2 offset = RandomPointWithMinSeparation(
-                tileRng,
-                chestScatterRadius,
-                used,
-                minSeparationInTile,
-                placementAttempts
-            );
-
-            Vector3 pos = center + new Vector3(offset.x, chestYOffset, offset.y);
-
-            var go = Instantiate(prefab, pos, Quaternion.Euler(0f, NextFloat(tileRng, 0f, 360f), 0f), _lootRoot);
-            float s = NextFloat(tileRng, chestScaleRange.x, chestScaleRange.y);
-            go.transform.localScale *= s;
-        }
-    }
-
-    // ----------------------------
-    // Utility
-    // ----------------------------
     private bool HasAtLeastOne(GameObject[] arr) => arr != null && arr.Length > 0;
 
     private void ClearOld()
@@ -625,10 +512,8 @@ public class MapGenerator : MonoBehaviour
             if (!t.name.StartsWith("GeneratedMap_")) continue;
 
 #if UNITY_EDITOR
-            if (!Application.isPlaying)
-                DestroyImmediate(t.gameObject);
-            else
-                Destroy(t.gameObject);
+            if (!Application.isPlaying) DestroyImmediate(t.gameObject);
+            else Destroy(t.gameObject);
 #else
             Destroy(t.gameObject);
 #endif
