@@ -14,9 +14,11 @@ public class MapGenerator : MonoBehaviour
     [Min(1)] public int width = MAP_SIZE;
     [Min(1)] public int height = MAP_SIZE;
 
+    [Header("Biome (required)")]
+    public BiomeData biome;
+
     [Header("Ground Tile")]
     public GameObject groundTilePrefab;
-    public Material groundMaterial;
 
     [Header("Tile Spacing (IMPORTANT)")]
     public bool autoSpacingFromPrefab = true;
@@ -67,11 +69,7 @@ public class MapGenerator : MonoBehaviour
     public bool useRandomSeed = true;
     public int seed = 12345;
 
-    [Header("Environment")]
-    public GameObject[] treePrefabs;
-    public GameObject[] rockPrefabs;
-    public GameObject[] bushPrefabs;
-
+    [Header("Environment (variation)")]
     [Min(0)] public int envSpawnsPerTileMin = 6;
 
     [Header("Spawn Randomness")]
@@ -88,6 +86,17 @@ public class MapGenerator : MonoBehaviour
 
     [Header("Scale Fix (recommended for Unity Plane 10x10)")]
     public bool useNormalizedRadii = true;
+
+    [Header("POI (spawn once)")]
+    public bool spawnPOI = true;
+
+    [Tooltip("If empty, uses biome.poiPrefabs")]
+    public GameObject[] poiPrefabsOverride;
+
+    [Tooltip("Reserved radius around POI where normal env cannot spawn.")]
+    public float poiReserveRadius = 8f;
+
+    public int poiPlacementAttempts = 50;
 
     // runtime
     private Transform _root, _tilesRoot, _envRoot;
@@ -106,6 +115,23 @@ public class MapGenerator : MonoBehaviour
     private float _jitterRadiusWorld;
     private float _minSepWorld;
 
+    // Track reserved zones (POI, later you can add more)
+    private readonly List<ReservedZone> _reservedZones = new();
+
+    private struct ReservedZone
+    {
+        public Vector3 center;
+        public float radius;
+
+        public ReservedZone(Vector3 c, float r)
+        {
+            center = c;
+            radius = r;
+        }
+    }
+
+    private enum TileTheme { Balanced, TreesHeavy, RocksHeavy, Clearing }
+
     [ContextMenu("Generate")]
     public void Generate()
     {
@@ -117,8 +143,13 @@ public class MapGenerator : MonoBehaviour
             Debug.LogError("MapGenerator: groundTilePrefab is missing.");
             return;
         }
+        if (biome == null)
+        {
+            Debug.LogError("MapGenerator: biome is missing.");
+            return;
+        }
 
-        ClearOld();
+        ClearOld(); // now destroys previous root directly
 
         if (useRandomSeed)
             seed = UnityEngine.Random.Range(int.MinValue, int.MaxValue);
@@ -129,20 +160,26 @@ public class MapGenerator : MonoBehaviour
         _tilesRoot = new GameObject("Tiles").transform; _tilesRoot.SetParent(_root, false);
         _envRoot = new GameObject("Environment").transform; _envRoot.SetParent(_root, false);
 
-        MeasureGroundPrefab();     // ✅ FIXED (respects prefab scale)
+        _reservedZones.Clear();
+
+        MeasureGroundPrefab(); // respects prefab scale
         ComputeEffectiveRadii();
 
         _offX = NextFloat(_rng, -10000f, 10000f);
         _offZ = NextFloat(_rng, -10000f, 10000f);
 
         SpawnTiles();
+
+        if (spawnPOI)
+            SpawnSinglePOI();
+
         SpawnEnvironmentEveryTile();
 
-        Debug.Log($"Generated map seed={seed} spacing=({_tileFootprintX:F2},{_tileFootprintZ:F2}) deform={deformTilesToCreateSlopes}");
+        Debug.Log($"Generated map seed={seed} spacing=({_tileFootprintX:F2},{_tileFootprintZ:F2}) deform={deformTilesToCreateSlopes} biome={biome.biomeName}");
     }
 
     // ----------------------------
-    // Measurement (FIXED)
+    // Measurement (fixed)
     // ----------------------------
     private void MeasureGroundPrefab()
     {
@@ -154,8 +191,7 @@ public class MapGenerator : MonoBehaviour
         sample.transform.position = Vector3.zero;
         sample.transform.rotation = Quaternion.identity;
 
-        // ✅ IMPORTANT FIX:
-        // Do NOT force Vector3.one. Respect prefab scale or you will mis-measure spacing.
+        // IMPORTANT: respect prefab scale
         sample.transform.localScale = groundTilePrefab.transform.localScale;
 
         if (!TryGetWorldBounds(sample, out Bounds b))
@@ -209,14 +245,14 @@ public class MapGenerator : MonoBehaviour
         }
 
         float large = Mathf.PerlinNoise(_offX + gx * largeScale, _offZ + gz * largeScale);
-        float hLarge = (large - 0.5f) * 2f * largeAmp;
+        float hLarge = (large - 0.5f) * 2f * largeAmp * Mathf.Max(0.001f, biome.largeAmpMultiplier);
 
         float ridgeBase = Mathf.PerlinNoise(_offX + 2000f + gx * ridgeScale, _offZ + 2000f + gz * ridgeScale);
         float ridge = 1f - Mathf.Abs(ridgeBase * 2f - 1f);
-        float hRidge = (ridge - 0.5f) * 2f * ridgeAmp;
+        float hRidge = (ridge - 0.5f) * 2f * ridgeAmp * Mathf.Max(0.001f, biome.ridgeAmpMultiplier);
 
         float detail = Mathf.PerlinNoise(_offX + 4000f + gx * detailScale, _offZ + 4000f + gz * detailScale);
-        float hDetail = (detail - 0.5f) * 2f * detailAmp;
+        float hDetail = (detail - 0.5f) * 2f * detailAmp * Mathf.Max(0.001f, biome.detailAmpMultiplier);
 
         float valleyMap = Mathf.PerlinNoise(_offX + 6000f + gx * valleyScale, _offZ + 6000f + gz * valleyScale);
         float valley = Mathf.Pow(valleyMap, 2.2f);
@@ -226,10 +262,11 @@ public class MapGenerator : MonoBehaviour
 
         if (heightStep > 0.0001f)
             h = Mathf.Round(h / heightStep) * heightStep;
-        
-        float flatStart = 3f;     // start flattening around this height (world units)
-        float flatRange = 6f;     // how wide the flatten band is
-        float flatStrength = 0.6f; // 0..1 how strong the flattening is
+
+        // Gentle flatten band (keeps playable-ish zones, avoids extreme spikes)
+        float flatStart = 3f;
+        float flatRange = 6f;
+        float flatStrength = 0.6f;
 
         float t = Mathf.InverseLerp(flatStart, flatStart + flatRange, Mathf.Abs(h));
         float flatten = Mathf.SmoothStep(0f, 1f, t);
@@ -270,7 +307,7 @@ public class MapGenerator : MonoBehaviour
                 Vector3 basePos = new Vector3(x * spacingX, yOffset, z * spacingZ);
 
                 var tile = Instantiate(groundTilePrefab, basePos, Quaternion.identity, _tilesRoot);
-                TryApplyGroundMaterial(tile, groundMaterial);
+                TryApplyGroundMaterial(tile, biome.groundMaterial);
 
                 if (deformTilesToCreateSlopes)
                     DeformTileMesh(tile, x, z);
@@ -314,7 +351,6 @@ public class MapGenerator : MonoBehaviour
             mesh.RecalculateBounds();
         }
 
-        // ✅ FIXED collider refresh (correct object, correct condition)
         var mc = mf.GetComponent<MeshCollider>();
         if (mc == null) mc = mf.gameObject.AddComponent<MeshCollider>();
         mc.sharedMesh = null;
@@ -329,14 +365,77 @@ public class MapGenerator : MonoBehaviour
     }
 
     // ----------------------------
-    // Environment
+    // POI (spawn exactly one)
+    // ----------------------------
+    private void SpawnSinglePOI()
+    {
+        GameObject[] poiPrefabs = (poiPrefabsOverride != null && poiPrefabsOverride.Length > 0)
+            ? poiPrefabsOverride
+            : biome.poiPrefabs;
+
+        if (!HasAtLeastOne(poiPrefabs))
+            return;
+
+        float spacingX = autoSpacingFromPrefab ? _tileFootprintX : 10f;
+        float spacingZ = autoSpacingFromPrefab ? _tileFootprintZ : 10f;
+
+        var poi = poiPrefabs[_rng.Next(0, poiPrefabs.Length)];
+
+        for (int attempt = 0; attempt < Mathf.Max(1, poiPlacementAttempts); attempt++)
+        {
+            int tx = _rng.Next(0, width);
+            int tz = _rng.Next(0, height);
+
+            Vector3 tileBase = new Vector3(tx * spacingX, 0f, tz * spacingZ);
+
+            float maxOffset = 0.35f * Mathf.Min(spacingX, spacingZ);
+            Vector2 offset2 = RandomInsideCircle(_rng, maxOffset);
+
+            Vector3 pos = tileBase + new Vector3(offset2.x, 0f, offset2.y);
+            pos = SnapToTerrainY(pos, 0f);
+
+            // Avoid overlapping other reserved zones
+            if (IsInsideReserved(pos, poiReserveRadius))
+                continue;
+
+            var go = Instantiate(poi, pos, Quaternion.Euler(0f, NextFloat(_rng, 0f, 360f), 0f), _root);
+            if (autoPivotCorrection)
+                ApplyAutoPivotCorrection(go, pos.y);
+
+            _reservedZones.Add(new ReservedZone(pos, poiReserveRadius));
+
+            Debug.Log($"Spawned POI '{poi.name}' at {pos} radius={poiReserveRadius}");
+            return;
+        }
+
+        Debug.LogWarning("Failed to place POI after attempts.");
+    }
+
+    private bool IsInsideReserved(Vector3 pos, float radius)
+    {
+        for (int i = 0; i < _reservedZones.Count; i++)
+        {
+            float rr = _reservedZones[i].radius + radius;
+            if ((pos - _reservedZones[i].center).sqrMagnitude <= rr * rr)
+                return true;
+        }
+        return false;
+    }
+
+    // ----------------------------
+    // Environment (variation + reserved zones)
     // ----------------------------
     private void SpawnEnvironmentEveryTile()
     {
-        if (!HasAtLeastOne(treePrefabs) && !HasAtLeastOne(rockPrefabs) && !HasAtLeastOne(bushPrefabs))
-            return;
+        if (biome == null) return;
 
-        int perTile = Mathf.Max(envSpawnsPerTileMin, 0);
+        bool hasEnv =
+            HasAtLeastOne(biome.treePrefabs) ||
+            HasAtLeastOne(biome.rockPrefabs) ||
+            HasAtLeastOne(biome.bushPrefabs);
+
+        if (!hasEnv)
+            return;
 
         float spacingX = autoSpacingFromPrefab ? _tileFootprintX : 10f;
         float spacingZ = autoSpacingFromPrefab ? _tileFootprintZ : 10f;
@@ -350,16 +449,28 @@ public class MapGenerator : MonoBehaviour
                 Vector3 tileBase = new Vector3(x * spacingX, 0f, z * spacingZ);
                 Vector3 center = GetTileSpawnCenter(tileBase, tileRng);
 
+                // Per-tile variation
+                var theme = RollTileTheme(tileRng);
+                int perTile = RollSpawnCount(tileRng);
+
+                // If the tile's center is inside a reserved POI, make it sparser
+                if (IsInsideReserved(center, 0f))
+                    perTile = Mathf.Min(perTile, 2);
+
                 var used = new List<Vector2>(perTile);
 
                 for (int i = 0; i < perTile; i++)
                 {
-                    GameObject prefab = PickEnvPrefab(tileRng);
+                    GameObject prefab = PickEnvPrefabThemed(tileRng, theme);
                     if (prefab == null) break;
 
                     Vector2 offset = RandomPointWithMinSeparation(tileRng, _envRadiusWorld, used, _minSepWorld, placementAttempts);
                     Vector3 pos = center + new Vector3(offset.x, 0f, offset.y);
                     pos = SnapToTerrainY(pos, 0f);
+
+                    // Respect POI reserved zones
+                    if (IsInsideReserved(pos, 0.5f))
+                        continue;
 
                     var go = Instantiate(prefab, pos, Quaternion.Euler(0f, NextFloat(tileRng, 0f, 360f), 0f), _envRoot);
 
@@ -370,27 +481,58 @@ public class MapGenerator : MonoBehaviour
         }
     }
 
-    private GameObject PickEnvPrefab(System.Random r)
+    private TileTheme RollTileTheme(System.Random r)
     {
-        // simple weighted-ish choice
-        int options = 0;
-        if (HasAtLeastOne(treePrefabs)) options++;
-        if (HasAtLeastOne(rockPrefabs)) options++;
-        if (HasAtLeastOne(bushPrefabs)) options++;
-        if (options == 0) return null;
+        double t = r.NextDouble();
+        if (t < 0.20) return TileTheme.Clearing;   // 20%
+        if (t < 0.45) return TileTheme.TreesHeavy; // 25%
+        if (t < 0.70) return TileTheme.RocksHeavy; // 25%
+        return TileTheme.Balanced;                 // 30%
+    }
 
-        int pick = r.Next(0, options);
-        if (HasAtLeastOne(treePrefabs))
+    private int RollSpawnCount(System.Random r)
+    {
+        int baseCount = Mathf.Max(envSpawnsPerTileMin, 0);
+        int delta = r.Next(-2, 4); // -2..+3
+        return Mathf.Max(0, baseCount + delta);
+    }
+
+    private GameObject PickEnvPrefabThemed(System.Random r, TileTheme theme)
+    {
+        var trees = biome.treePrefabs;
+        var rocks = biome.rockPrefabs;
+        var bushes = biome.bushPrefabs;
+
+        int wTrees = (theme == TileTheme.TreesHeavy) ? 6 : 3;
+        int wRocks = (theme == TileTheme.RocksHeavy) ? 6 : 3;
+        int wBush = (theme == TileTheme.Clearing) ? 1 : 2;
+
+        if (theme == TileTheme.Clearing)
         {
-            if (pick == 0) return treePrefabs[r.Next(0, treePrefabs.Length)];
-            pick--;
+            wTrees = 0;
+            wRocks = 2;
+            wBush = 1;
         }
-        if (HasAtLeastOne(rockPrefabs))
+
+        int total = 0;
+        if (HasAtLeastOne(trees)) total += wTrees;
+        if (HasAtLeastOne(rocks)) total += wRocks;
+        if (HasAtLeastOne(bushes)) total += wBush;
+        if (total == 0) return null;
+
+        int roll = r.Next(0, total);
+
+        if (HasAtLeastOne(trees))
         {
-            if (pick == 0) return rockPrefabs[r.Next(0, rockPrefabs.Length)];
-            pick--;
+            if (roll < wTrees) return trees[r.Next(0, trees.Length)];
+            roll -= wTrees;
         }
-        return HasAtLeastOne(bushPrefabs) ? bushPrefabs[r.Next(0, bushPrefabs.Length)] : null;
+        if (HasAtLeastOne(rocks))
+        {
+            if (roll < wRocks) return rocks[r.Next(0, rocks.Length)];
+            roll -= wRocks;
+        }
+        return HasAtLeastOne(bushes) ? bushes[r.Next(0, bushes.Length)] : null;
     }
 
     private void ApplyAutoPivotCorrection(GameObject go, float groundY)
@@ -418,7 +560,6 @@ public class MapGenerator : MonoBehaviour
 
         Vector3 rayStart = new Vector3(worldPos.x, groundRaycastStartHeight, worldPos.z);
 
-        // IMPORTANT: if your groundLayerMask includes trees/rocks colliders, raycast may hit them first.
         if (Physics.Raycast(rayStart, Vector3.down, out RaycastHit hit, groundRaycastStartHeight * 2f, groundLayerMask))
         {
             worldPos.y = hit.point.y + extraYOffset + groundExtraOffset;
@@ -504,11 +645,29 @@ public class MapGenerator : MonoBehaviour
 
     private bool HasAtLeastOne(GameObject[] arr) => arr != null && arr.Length > 0;
 
+    // ----------------------------
+    // Clear old (fast)
+    // ----------------------------
     private void ClearOld()
     {
-        var all = GameObject.FindObjectsOfType<Transform>();
-        foreach (var t in all)
+        // Destroy previous root directly instead of scanning the entire scene
+        if (_root != null)
         {
+#if UNITY_EDITOR
+            if (!Application.isPlaying) DestroyImmediate(_root.gameObject);
+            else Destroy(_root.gameObject);
+#else
+            Destroy(_root.gameObject);
+#endif
+            _root = null;
+        }
+
+        // Also clean up any lingering generated objects by name (safety net)
+        // This is much smaller than scanning all transforms; you can remove later.
+        var roots = GameObject.FindObjectsOfType<Transform>();
+        foreach (var t in roots)
+        {
+            if (t.parent != null) continue; // only scene roots
             if (!t.name.StartsWith("GeneratedMap_")) continue;
 
 #if UNITY_EDITOR

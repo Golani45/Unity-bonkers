@@ -1,0 +1,26 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b2e6f85c11a6c4f4d8baafcea53475d5, type: 3}
+  m_Name: Biome_Desert
+  m_EditorClassIdentifier: Assembly-CSharp::BiomeData
+  biomeName: Desert
+  groundMaterial: {fileID: 2100000, guid: 5231d84cddd040742860333eec07f372, type: 2}
+  treePrefabs:
+  - {fileID: 919132149155446097, guid: aab7f31e374a03d44923a155620b8f18, type: 3}
+  rockPrefabs:
+  - {fileID: 919132149155446097, guid: b138cb6e6d9cbd345888c83d724eac17, type: 3}
+  bushPrefabs:
+  - {fileID: 919132149155446097, guid: 08cf17a8204eccd4981de2725be44dee, type: 3}
+  largeAmpMultiplier: 1
+  ridgeAmpMultiplier: 1
+  detailAmpMultiplier: 1
+  poiPrefabs: []

@@ -60,6 +60,12 @@ Assets/JC_StylizedRocks_Lite/
 Assets/PBR Ground Materials #1 [Dirt& Grass]/
 Assets/_TerrainAutoUpgrade/
 
+# Ignore everything inside Downloaded Packages
+Assets/Downloaded Packages/**
+# But keep the folder itself in the repo
+!Assets/Downloaded Packages/
+!Assets/Downloaded Packages/.gitkeep
+
 # Ignore .meta files for ignored asset-pack folders
 Assets/Darth_Artisan.meta
 Assets/Downtown Game Studio.meta
@@ -67,3 +73,5 @@ Assets/GrassFlowers.meta
 Assets/JC_StylizedRocks_Lite.meta
 Assets/PBR Ground Materials #1 [Dirt& Grass].meta
 Assets/_TerrainAutoUpgrade.meta
+Assets/Downloaded Packages.meta
+
