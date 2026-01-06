@@ -51,3 +51,19 @@ crashlytics-build.properties
 
 # --- PlasticSCM (if used) ---
 ignore.conf
+
+# Large imported asset packs (local only)
+Assets/Darth_Artisan/
+Assets/Downtown Game Studio/
+Assets/GrassFlowers/
+Assets/JC_StylizedRocks_Lite/
+Assets/PBR Ground Materials #1 [Dirt& Grass]/
+Assets/_TerrainAutoUpgrade/
+
+# Ignore .meta files for ignored asset-pack folders
+Assets/Darth_Artisan.meta
+Assets/Downtown Game Studio.meta
+Assets/GrassFlowers.meta
+Assets/JC_StylizedRocks_Lite.meta
+Assets/PBR Ground Materials #1 [Dirt& Grass].meta
+Assets/_TerrainAutoUpgrade.meta
