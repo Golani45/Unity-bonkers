@@ -104,6 +104,5 @@ AssetOrigin:
   productId: 210184
   packageName: Nature Pack - Low Polly Trees & Bushes
   packageVersion: 1.0
-  assetPath: Assets/Downtown Game Studio/Nature Pack - Low Polly Trees & Bushes/Models/tree
-    11.fbx
+  assetPath: Assets/Prefabs/Biomes/Forest/tree 11.fbx
   uploadId: 477047
