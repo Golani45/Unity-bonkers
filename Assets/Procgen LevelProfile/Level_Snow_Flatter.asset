@@ -1,0 +1,44 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c33def73c91c53a45827bbfbc3c98525, type: 3}
+  m_Name: Level_Snow_Flatter
+  m_EditorClassIdentifier: Assembly-CSharp::LevelGenProfile
+  biome: {fileID: 11400000, guid: 20abaa5b86c915741b9e9089fd75b6e1, type: 2}
+  width: 10
+  height: 10
+  tileSize: 10
+  vertsPerTile: 8
+  largeScale: 0.08
+  largeAmp: 12
+  ridgeScale: 0.17
+  ridgeAmp: 4
+  detailScale: 0.55
+  detailAmp: 0.6
+  valleyStrength: 0.7
+  valleyScale: 0.05
+  useDomainWarp: 1
+  warpScale: 0.12
+  warpStrength: 2.5
+  heightStep: 0
+  maxDeltaPerVertex: 1.25
+  smoothingPasses: 2
+  envSpawnsPerTileMin: 6
+  envScatterRadius: 0.45
+  perTileJitterRadius: 0.18
+  minSeparationInTile: 0.1
+  placementAttempts: 12
+  spawnPOI: 1
+  poiPrefabsOverride: []
+  poiReserveRadius: 8
+  poiPlacementAttempts: 50
+  useRandomSeed: 1
+  seed: 12345

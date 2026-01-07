@@ -8,109 +8,53 @@ using UnityEditor;
 
 public class MapGenerator : MonoBehaviour
 {
-    private const int MAP_SIZE = 10;
-
-    [Header("Map Dimensions (forced 10x10 at runtime)")]
-    [Min(1)] public int width = MAP_SIZE;
-    [Min(1)] public int height = MAP_SIZE;
-
-    [Header("Biome (required)")]
-    public BiomeData biome;
-
-    [Header("Ground Tile")]
-    public GameObject groundTilePrefab;
-
-    [Header("Tile Spacing (IMPORTANT)")]
-    public bool autoSpacingFromPrefab = true;
-    [Tooltip("Multiplies measured tile size. Use 1.0 normally.")]
-    public float spacingMultiplier = 1.0f;
-
-    [Tooltip("Unity Plane pivot is centered (recommended ON for Plane).")]
-    public bool tilePivotIsCentered = true;
-
-    [Header("Terrain Shape (Mega Bonk-ish)")]
-    public float largeScale = 0.08f;
-    public float largeAmp = 12f;
-
-    public float ridgeScale = 0.17f;
-    public float ridgeAmp = 4f;
-
-    public float detailScale = 0.55f;
-    public float detailAmp = 0.6f;
-
-    [Range(0f, 1f)] public float valleyStrength = 0.70f;
-    public float valleyScale = 0.05f;
-
-    [Header("Optional Domain Warp")]
-    public bool useDomainWarp = true;
-    public float warpScale = 0.12f;
-    public float warpStrength = 2.5f;
-
-    [Header("Optional stepping (0 = smooth)")]
-    public float heightStep = 0f;
-
-    [Header("REAL SLOPES (recommended)")]
-    public bool deformTilesToCreateSlopes = true;
-    public bool recalcNormalsAfterDeform = true;
+    [Header("Level Profile (required)")]
+    public LevelGenProfile profile;
 
     [Header("Ground Placement (fix floating objects)")]
     public bool useRaycastGrounding = true;
+    
+    private MeshCollider _terrainCollider;
+    private bool _playerPrevKinematic;
+    private bool _playerPrevDetectCollisions;
+
+
+// Map coordinate system (centered)
+    private float _mapWorldSizeX;
+    private float _mapWorldSizeZ;
+    private Vector3 _mapOrigin; // bottom-left corner in world space (centered map => negative half extents)
+
+
 
     [Tooltip("Set this to ONLY your Ground layer for best results.")]
     public LayerMask groundLayerMask = ~0;
+    
+    [Header("Player Spawn (optional)")]
+    public bool snapPlayerAfterGenerate = true;
+    public Vector2 spawnNormalized = new Vector2(0.5f, 0.5f); // 0..1 (center by default)
+    public float spawnExtraHeight = 2.0f;    // extra height above ground
+    public float spawnRayStartHeight = 500f; // how high to raycast from
+
 
     public float groundRaycastStartHeight = 300f;
     public float groundExtraOffset = 0.0f;
 
     [Header("Auto Pivot Correction (trees with wrong pivots)")]
     public bool autoPivotCorrection = true;
-
-    [Header("Seed (repeatable runs)")]
-    public bool useRandomSeed = true;
-    public int seed = 12345;
-
-    [Header("Environment (variation)")]
-    [Min(0)] public int envSpawnsPerTileMin = 6;
-
-    [Header("Spawn Randomness")]
-    [Tooltip("Fraction of HALF tile size if Use Normalized Radii is ON")]
-    public float envScatterRadius = 0.45f;
-
-    [Tooltip("Fraction of HALF tile size if Use Normalized Radii is ON")]
-    public float perTileJitterRadius = 0.18f;
-
-    [Tooltip("Fraction of HALF tile size if Use Normalized Radii is ON")]
-    public float minSeparationInTile = 0.10f;
-
-    public int placementAttempts = 12;
-
-    [Header("Scale Fix (recommended for Unity Plane 10x10)")]
-    public bool useNormalizedRadii = true;
-
-    [Header("POI (spawn once)")]
-    public bool spawnPOI = true;
-
-    [Tooltip("If empty, uses biome.poiPrefabs")]
-    public GameObject[] poiPrefabsOverride;
-
-    [Tooltip("Reserved radius around POI where normal env cannot spawn.")]
-    public float poiReserveRadius = 8f;
-
-    public int poiPlacementAttempts = 50;
+    
+    [Header("Player Placement")]
+    public Transform player;              // drag your sphere here
+    public float playerSnapHeight = 200f;  // how high to raycast from
+    public float playerGroundClearance = 1.5f; // how far above ground to place
 
     // runtime
-    private Transform _root, _tilesRoot, _envRoot;
+    private Transform _root, _terrainRoot, _envRoot;
     private System.Random _rng;
-
-    // measured tile
-    private float _tileFootprintX = 10f;
-    private float _tileFootprintZ = 10f;
-    private float _tileThicknessY = 0.0f;
 
     // noise offsets
     private float _offX, _offZ;
 
-    // effective radii
+    // effective radii (world units)
     private float _envRadiusWorld;
     private float _jitterRadiusWorld;
     private float _minSepWorld;
@@ -132,236 +76,494 @@ public class MapGenerator : MonoBehaviour
 
     private enum TileTheme { Balanced, TreesHeavy, RocksHeavy, Clearing }
 
+    private Coroutine _spawnRoutine;
+
     [ContextMenu("Generate")]
     public void Generate()
     {
-        width = MAP_SIZE;
-        height = MAP_SIZE;
-
-        if (groundTilePrefab == null)
+        if (profile == null)
         {
-            Debug.LogError("MapGenerator: groundTilePrefab is missing.");
+            Debug.LogError("MapGenerator: profile is missing.");
             return;
         }
-        if (biome == null)
+        if (profile.biome == null)
         {
-            Debug.LogError("MapGenerator: biome is missing.");
+            Debug.LogError("MapGenerator: profile.biome is missing.");
             return;
         }
 
-        ClearOld(); // now destroys previous root directly
+        // Stop any previous spawn routine
+        if (_spawnRoutine != null)
+        {
+            StopCoroutine(_spawnRoutine);
+            _spawnRoutine = null;
 
-        if (useRandomSeed)
-            seed = UnityEngine.Random.Range(int.MinValue, int.MaxValue);
+            // IMPORTANT: if we stopped mid-regeneration, restore player physics
+            RestorePlayerPhysics();
+        }
 
-        _rng = new System.Random(seed);
+        PreparePlayerForRegeneration();
 
-        _root = new GameObject($"GeneratedMap_10x10_seed_{seed}").transform;
-        _tilesRoot = new GameObject("Tiles").transform; _tilesRoot.SetParent(_root, false);
-        _envRoot = new GameObject("Environment").transform; _envRoot.SetParent(_root, false);
+        ClearOld();
+
+        if (profile.useRandomSeed)
+            profile.seed = UnityEngine.Random.Range(int.MinValue, int.MaxValue);
+
+        _rng = new System.Random(profile.seed);
+
+        _root = new GameObject($"GeneratedMap_{profile.width}x{profile.height}_seed_{profile.seed}").transform;
+        _terrainRoot = new GameObject("Terrain").transform;
+        _terrainRoot.SetParent(_root, false);
+
+        _envRoot = new GameObject("Environment").transform;
+        _envRoot.SetParent(_root, false);
 
         _reservedZones.Clear();
-
-        MeasureGroundPrefab(); // respects prefab scale
-        ComputeEffectiveRadii();
 
         _offX = NextFloat(_rng, -10000f, 10000f);
         _offZ = NextFloat(_rng, -10000f, 10000f);
 
-        SpawnTiles();
+        ComputeEffectiveRadii();
 
-        if (spawnPOI)
+        BuildCombinedTerrainMesh();
+
+        if (profile.spawnPOI)
             SpawnSinglePOI();
+
+        Debug.Log("Generate() called. snapPlayerAfterGenerate=" + snapPlayerAfterGenerate);
+
+        Debug.Log($"Generated map seed={profile.seed} sizeTiles=({profile.width},{profile.height}) tileSize={profile.tileSize} vertsPerTile={profile.vertsPerTile} biome={profile.biome.biomeName}");
+        Debug.Log("_terrainCollider is " + (_terrainCollider == null ? "NULL" : "OK"));
 
         SpawnEnvironmentEveryTile();
 
-        Debug.Log($"Generated map seed={seed} spacing=({_tileFootprintX:F2},{_tileFootprintZ:F2}) deform={deformTilesToCreateSlopes} biome={biome.biomeName}");
-    }
-
-    // ----------------------------
-    // Measurement (fixed)
-    // ----------------------------
-    private void MeasureGroundPrefab()
-    {
-        GameObject sample = Instantiate(groundTilePrefab);
-        sample.name = "__MEASURE_SAMPLE__";
-        sample.hideFlags = HideFlags.HideAndDontSave;
-
-        sample.SetActive(true);
-        sample.transform.position = Vector3.zero;
-        sample.transform.rotation = Quaternion.identity;
-
-        // IMPORTANT: respect prefab scale
-        sample.transform.localScale = groundTilePrefab.transform.localScale;
-
-        if (!TryGetWorldBounds(sample, out Bounds b))
+        if (snapPlayerAfterGenerate)
         {
-            Debug.LogWarning("Could not measure groundTilePrefab bounds. Falling back to Plane-ish 10x10.");
-            _tileFootprintX = 10f * spacingMultiplier;
-            _tileFootprintZ = 10f * spacingMultiplier;
-            _tileThicknessY = 0.01f;
+            if (Application.isPlaying)
+            {
+                _spawnRoutine = StartCoroutine(SnapPlayerAfterPhysics());
+            }
+            else
+            {
+                // In Editor mode, we snap instantly without yielding
+                SnapPlayerToGround();
+                RestorePlayerPhysics();
+            }
         }
         else
         {
-            _tileFootprintX = Mathf.Max(0.01f, b.size.x) * spacingMultiplier;
-            _tileFootprintZ = Mathf.Max(0.01f, b.size.z) * spacingMultiplier;
-            _tileThicknessY = Mathf.Max(0.001f, b.size.y);
+            RestorePlayerPhysics();
+        }
+        
+        if (player != null && player.TryGetComponent<Rigidbody>(out var rb))
+        {
+            rb.isKinematic = false;
+            rb.detectCollisions = true;
+            rb.useGravity = true;
+            rb.WakeUp();
+        }
+        
+    } 
+    
+    private void PreparePlayerForRegeneration()
+    {
+        if (player == null) return;
+        Debug.Log("Freezing player: " + player.name);
+
+        var rb = player.GetComponent<Rigidbody>();
+        if (rb != null)
+        {
+            _playerPrevKinematic = rb.isKinematic;
+            _playerPrevDetectCollisions = rb.detectCollisions;
+
+            rb.linearVelocity = Vector3.zero;
+            rb.angularVelocity = Vector3.zero;
+            rb.isKinematic = true;
+            rb.detectCollisions = false;
         }
 
-#if UNITY_EDITOR
-        DestroyImmediate(sample);
-#else
-        Destroy(sample);
-#endif
+        // Park above map center-ish
+        player.position = new Vector3(0f, spawnRayStartHeight + 50f, 0f);
+        Physics.SyncTransforms();
+    }
+    
+    private void RestorePlayerPhysics()
+    {
+        if (player == null) return;
+
+        if (player.TryGetComponent<Rigidbody>(out var rb))
+        {
+            rb.isKinematic = false;
+            rb.detectCollisions = true;
+            rb.useGravity = true;
+
+            rb.linearVelocity = Vector3.zero;
+            rb.angularVelocity = Vector3.zero;
+
+            rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            rb.interpolation = RigidbodyInterpolation.Interpolate;
+
+            rb.WakeUp();
+        }
     }
 
-    private bool TryGetWorldBounds(GameObject go, out Bounds bounds)
+
+    
+    private void SnapPlayerToGround()
     {
-        var renderers = go.GetComponentsInChildren<Renderer>(true);
-        if (renderers == null || renderers.Length == 0)
+        if (player == null || profile == null)
+            return;
+
+        // Get spawn XZ in WORLD coordinates (0..map size)
+        Vector3 spawnXZ = GetSpawnXZWorld();
+
+        // Start ray high above the terrain
+        Vector3 rayStart = new Vector3(
+            spawnXZ.x,
+            spawnRayStartHeight,
+            spawnXZ.z
+        );
+
+        // Try raycast first (preferred, uses collider)
+        if (Physics.Raycast(
+                rayStart,
+                Vector3.down,
+                out RaycastHit hit,
+                spawnRayStartHeight * 2f,
+                groundLayerMask,
+                QueryTriggerInteraction.Ignore))
         {
-            bounds = new Bounds(go.transform.position, Vector3.zero);
-            return false;
+            player.position = hit.point + Vector3.up * spawnExtraHeight;
+        }
+        else
+        {
+            // Fallback: sample height mathematically (guaranteed)
+            float h = SampleHeightWorld(spawnXZ.x, spawnXZ.z);
+            player.position = new Vector3(
+                spawnXZ.x,
+                h + spawnExtraHeight,
+                spawnXZ.z
+            );
+
+            Debug.LogWarning(
+                "Player spawn raycast missed terrain. " +
+                "Falling back to height sampling."
+            );
         }
 
-        bounds = renderers[0].bounds;
-        for (int i = 1; i < renderers.Length; i++)
-            bounds.Encapsulate(renderers[i].bounds);
-
-        return true;
-    }
-
-    // ----------------------------
-    // Noise / height
-    // ----------------------------
-    private float SampleHeightGrid(float gx, float gz)
-    {
-        if (useDomainWarp)
+        // Reset physics so the player doesn't keep falling
+        if (player.TryGetComponent<Rigidbody>(out Rigidbody rb))
         {
-            float wx = (Mathf.PerlinNoise(_offX + gx * warpScale, _offZ + gz * warpScale) - 0.5f) * 2f;
-            float wz = (Mathf.PerlinNoise(_offX + 999f + gx * warpScale, _offZ + 999f + gz * warpScale) - 0.5f) * 2f;
-            gx += wx * warpStrength;
-            gz += wz * warpStrength;
+            rb.linearVelocity = Vector3.zero;
+            rb.angularVelocity = Vector3.zero;
+            rb.Sleep();
+            rb.WakeUp();
         }
-
-        float large = Mathf.PerlinNoise(_offX + gx * largeScale, _offZ + gz * largeScale);
-        float hLarge = (large - 0.5f) * 2f * largeAmp * Mathf.Max(0.001f, biome.largeAmpMultiplier);
-
-        float ridgeBase = Mathf.PerlinNoise(_offX + 2000f + gx * ridgeScale, _offZ + 2000f + gz * ridgeScale);
-        float ridge = 1f - Mathf.Abs(ridgeBase * 2f - 1f);
-        float hRidge = (ridge - 0.5f) * 2f * ridgeAmp * Mathf.Max(0.001f, biome.ridgeAmpMultiplier);
-
-        float detail = Mathf.PerlinNoise(_offX + 4000f + gx * detailScale, _offZ + 4000f + gz * detailScale);
-        float hDetail = (detail - 0.5f) * 2f * detailAmp * Mathf.Max(0.001f, biome.detailAmpMultiplier);
-
-        float valleyMap = Mathf.PerlinNoise(_offX + 6000f + gx * valleyScale, _offZ + 6000f + gz * valleyScale);
-        float valley = Mathf.Pow(valleyMap, 2.2f);
-        float valleyDrop = Mathf.Lerp(0f, largeAmp * 0.9f, valleyStrength) * (1f - valley);
-
-        float h = hLarge + hRidge + hDetail - valleyDrop;
-
-        if (heightStep > 0.0001f)
-            h = Mathf.Round(h / heightStep) * heightStep;
-
-        // Gentle flatten band (keeps playable-ish zones, avoids extreme spikes)
-        float flatStart = 3f;
-        float flatRange = 6f;
-        float flatStrength = 0.6f;
-
-        float t = Mathf.InverseLerp(flatStart, flatStart + flatRange, Mathf.Abs(h));
-        float flatten = Mathf.SmoothStep(0f, 1f, t);
-        h = Mathf.Lerp(h, Mathf.Sign(h) * flatStart, flatStrength * (1f - flatten));
-
-        return h;
     }
-
-    private void WorldToGrid(float wx, float wz, out float gx, out float gz)
+    
+    private Vector3 GetSpawnXZWorld()
     {
-        float spacingX = autoSpacingFromPrefab ? _tileFootprintX : 10f;
-        float spacingZ = autoSpacingFromPrefab ? _tileFootprintZ : 10f;
+        if (profile == null) return Vector3.zero;
 
-        gx = wx / Mathf.Max(0.0001f, spacingX);
-        gz = wz / Mathf.Max(0.0001f, spacingZ);
-    }
+        float x = _mapOrigin.x + (spawnNormalized.x * _mapWorldSizeX);
+        float z = _mapOrigin.z + (spawnNormalized.y * _mapWorldSizeZ);
 
-    private float SampleHeightWorld(float wx, float wz)
-    {
-        WorldToGrid(wx, wz, out float gx, out float gz);
-        return SampleHeightGrid(gx, gz);
+        // Keep player away from exact edge a bit
+        x = Mathf.Clamp(x, _mapOrigin.x + 1f, _mapOrigin.x + _mapWorldSizeX - 1f);
+        z = Mathf.Clamp(z, _mapOrigin.z + 1f, _mapOrigin.z + _mapWorldSizeZ - 1f);
+
+        return new Vector3(x, 0f, z);
     }
+    
+
+
 
     // ----------------------------
-    // Tiles
+    // Combined mesh terrain
     // ----------------------------
-    private void SpawnTiles()
+private void BuildCombinedTerrainMesh()
+{
+    int widthTiles = Mathf.Max(1, profile.width);
+    int heightTiles = Mathf.Max(1, profile.height);
+    float tileSize = Mathf.Max(0.01f, profile.tileSize);
+
+    int vpt = Mathf.Max(2, profile.vertsPerTile);
+    int vertsX = widthTiles * vpt + 1;
+    int vertsZ = heightTiles * vpt + 1;
+
+    float worldSizeX = widthTiles * tileSize;
+    float worldSizeZ = heightTiles * tileSize;
+
+    // IMPORTANT: origin at (0,0) — consistent with spawn & env logic
+    _mapWorldSizeX = worldSizeX;
+    _mapWorldSizeZ = worldSizeZ;
+    _mapOrigin = Vector3.zero;
+
+    float[] heights = new float[vertsX * vertsZ];
+    Vector3[] verts = new Vector3[vertsX * vertsZ];
+    Vector2[] uvs = new Vector2[vertsX * vertsZ];
+    int[] tris = new int[(vertsX - 1) * (vertsZ - 1) * 6];
+
+    // --- Sample heights ---
+    for (int z = 0; z < vertsZ; z++)
     {
-        float spacingX = autoSpacingFromPrefab ? _tileFootprintX : 10f;
-        float spacingZ = autoSpacingFromPrefab ? _tileFootprintZ : 10f;
-
-        float yOffset = tilePivotIsCentered ? (_tileThicknessY * 0.5f) : 0f;
-
-        for (int z = 0; z < height; z++)
+        float wz = (z / (float)(vertsZ - 1)) * worldSizeZ;
+        for (int x = 0; x < vertsX; x++)
         {
-            for (int x = 0; x < width; x++)
+            float wx = (x / (float)(vertsX - 1)) * worldSizeX;
+            int i = z * vertsX + x;
+            heights[i] = SampleHeightWorld(wx, wz);
+        }
+    }
+
+    ClampNeighborDeltas(heights, vertsX, vertsZ, profile.maxDeltaPerVertex);
+
+    for (int p = 0; p < Mathf.Clamp(profile.smoothingPasses, 0, 10); p++)
+        SmoothHeights5Tap(heights, vertsX, vertsZ);
+
+    // --- Build vertices + UVs ---
+    for (int z = 0; z < vertsZ; z++)
+    {
+        float wz = (z / (float)(vertsZ - 1)) * worldSizeZ;
+        for (int x = 0; x < vertsX; x++)
+        {
+            float wx = (x / (float)(vertsX - 1)) * worldSizeX;
+            int i = z * vertsX + x;
+
+            verts[i] = new Vector3(wx, heights[i], wz);
+            uvs[i] = new Vector2(wx / worldSizeX, wz / worldSizeZ);
+        }
+    }
+
+    // --- Triangles (initial winding) ---
+    int ti = 0;
+    for (int z = 0; z < vertsZ - 1; z++)
+    {
+        for (int x = 0; x < vertsX - 1; x++)
+        {
+            int i0 = z * vertsX + x;
+            int i1 = i0 + 1;
+            int i2 = i0 + vertsX;
+            int i3 = i2 + 1;
+
+            tris[ti++] = i0; tris[ti++] = i1; tris[ti++] = i2;
+            tris[ti++] = i1; tris[ti++] = i3; tris[ti++] = i2;
+        }
+    }
+
+    // --- Create GameObject ---
+    var terrainGO = new GameObject("TerrainMesh");
+    terrainGO.transform.SetParent(_terrainRoot, false);
+    terrainGO.transform.position = Vector3.zero;
+
+    var mf = terrainGO.AddComponent<MeshFilter>();
+    var mr = terrainGO.AddComponent<MeshRenderer>();
+    var mc = terrainGO.AddComponent<MeshCollider>();
+    _terrainCollider = mc;
+
+    mc.cookingOptions =
+        MeshColliderCookingOptions.CookForFasterSimulation |
+        MeshColliderCookingOptions.EnableMeshCleaning |
+        MeshColliderCookingOptions.WeldColocatedVertices;
+
+    var mesh = new Mesh();
+    mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+    mesh.vertices = verts;
+    mesh.triangles = tris;
+    mesh.uv = uvs;
+
+    // ---------- FORCE TERRAIN TO FACE UP ----------
+    mesh.RecalculateNormals();
+    mesh.RecalculateBounds();
+
+    Vector3 avg = Vector3.zero;
+    var normals = mesh.normals;
+    int step = Mathf.Max(1, normals.Length / 256);
+
+    for (int i = 0; i < normals.Length; i += step)
+        avg += normals[i];
+
+    if (avg.y < 0f)
+    {
+        int[] t = mesh.triangles;
+        for (int i = 0; i < t.Length; i += 3)
+        {
+            int tmp = t[i + 1];
+            t[i + 1] = t[i + 2];
+            t[i + 2] = tmp;
+        }
+        mesh.triangles = t;
+        mesh.RecalculateNormals();
+        mesh.RecalculateBounds();
+    }
+    // ---------------------------------------------
+
+    mf.sharedMesh = mesh;
+
+    if (profile.biome != null && profile.biome.groundMaterial != null)
+        mr.sharedMaterial = profile.biome.groundMaterial;
+
+    // Force collider refresh
+    mc.sharedMesh = null;
+    mc.sharedMesh = mesh;
+
+    // Set Ground layer
+    int groundLayer = LayerMask.NameToLayer("Ground");
+    if (groundLayer != -1)
+        SetLayerRecursively(terrainGO, groundLayer);
+
+    Physics.SyncTransforms();
+}
+
+private float SampleHeightLocal(float localX, float localZ)
+{
+    // Convert local world coords (0..mapSize) into tile grid coords
+    float gx = localX / Mathf.Max(0.0001f, profile.tileSize);
+    float gz = localZ / Mathf.Max(0.0001f, profile.tileSize);
+    return SampleHeightGrid(gx, gz);
+}
+
+private float SampleHeightWorld(float worldX, float worldZ)
+{
+    // Convert WORLD into LOCAL (0..mapSize)
+    float localX = worldX - _mapOrigin.x;
+    float localZ = worldZ - _mapOrigin.z;
+
+    // Clamp so we don't sample outside
+    localX = Mathf.Clamp(localX, 0f, _mapWorldSizeX);
+    localZ = Mathf.Clamp(localZ, 0f, _mapWorldSizeZ);
+
+    return SampleHeightLocal(localX, localZ);
+}
+
+
+private bool IsMeshFacingUp(Mesh m)
+{
+    // Average normals: if mostly pointing up, y should be positive
+    var normals = m.normals;
+    if (normals == null || normals.Length == 0) return true;
+
+    float sumY = 0f;
+    int step = Mathf.Max(1, normals.Length / 256); // sample up to ~256 normals
+    for (int i = 0; i < normals.Length; i += step)
+        sumY += normals[i].y;
+
+    return sumY >= 0f;
+}
+
+private void FlipMeshWinding(Mesh m)
+{
+    int[] t = m.triangles;
+    for (int i = 0; i < t.Length; i += 3)
+    {
+        // swap order of two indices
+        int tmp = t[i + 1];
+        t[i + 1] = t[i + 2];
+        t[i + 2] = tmp;
+    }
+    m.triangles = t;
+}
+
+
+    private void ClampNeighborDeltas(float[] h, int vertsX, int vertsZ, float maxDelta)
+    {
+        maxDelta = Mathf.Max(0.001f, maxDelta);
+
+        // Forward pass: clamp vs left and down
+        for (int z = 0; z < vertsZ; z++)
+        {
+            for (int x = 0; x < vertsX; x++)
             {
-                Vector3 basePos = new Vector3(x * spacingX, yOffset, z * spacingZ);
+                int i = z * vertsX + x;
 
-                var tile = Instantiate(groundTilePrefab, basePos, Quaternion.identity, _tilesRoot);
-                TryApplyGroundMaterial(tile, biome.groundMaterial);
+                if (x > 0)
+                {
+                    int il = i - 1;
+                    float d = h[i] - h[il];
+                    if (Mathf.Abs(d) > maxDelta) h[i] = h[il] + Mathf.Sign(d) * maxDelta;
+                }
+                if (z > 0)
+                {
+                    int id = i - vertsX;
+                    float d = h[i] - h[id];
+                    if (Mathf.Abs(d) > maxDelta) h[i] = h[id] + Mathf.Sign(d) * maxDelta;
+                }
+            }
+        }
 
-                if (deformTilesToCreateSlopes)
-                    DeformTileMesh(tile, x, z);
+        // Backward pass: clamp vs right and up (helps symmetry)
+        for (int z = vertsZ - 1; z >= 0; z--)
+        {
+            for (int x = vertsX - 1; x >= 0; x--)
+            {
+                int i = z * vertsX + x;
+
+                if (x < vertsX - 1)
+                {
+                    int ir = i + 1;
+                    float d = h[i] - h[ir];
+                    if (Mathf.Abs(d) > maxDelta) h[i] = h[ir] + Mathf.Sign(d) * maxDelta;
+                }
+                if (z < vertsZ - 1)
+                {
+                    int iu = i + vertsX;
+                    float d = h[i] - h[iu];
+                    if (Mathf.Abs(d) > maxDelta) h[i] = h[iu] + Mathf.Sign(d) * maxDelta;
+                }
             }
         }
     }
 
-    private void DeformTileMesh(GameObject tile, int tileX, int tileZ)
+    private void SmoothHeights5Tap(float[] h, int vertsX, int vertsZ)
     {
-        var mf = tile.GetComponentInChildren<MeshFilter>();
-        if (mf == null || mf.sharedMesh == null) return;
+        var copy = (float[])h.Clone();
 
-        Mesh mesh = mf.mesh; // instance
-        Vector3[] verts = mesh.vertices;
-
-        Bounds b = mesh.bounds;
-        float minX = b.min.x;
-        float minZ = b.min.z;
-        float sizeX = Mathf.Max(0.0001f, b.size.x);
-        float sizeZ = Mathf.Max(0.0001f, b.size.z);
-
-        for (int i = 0; i < verts.Length; i++)
+        for (int z = 1; z < vertsZ - 1; z++)
         {
-            Vector3 v = verts[i];
-
-            float u = (v.x - minX) / sizeX; // 0..1
-            float w = (v.z - minZ) / sizeZ; // 0..1
-
-            float gx = tileX + (u - 0.5f);
-            float gz = tileZ + (w - 0.5f);
-
-            v.y = SampleHeightGrid(gx, gz);
-            verts[i] = v;
+            for (int x = 1; x < vertsX - 1; x++)
+            {
+                int i = z * vertsX + x;
+                float avg =
+                    copy[i] +
+                    copy[i - 1] + copy[i + 1] +
+                    copy[i - vertsX] + copy[i + vertsX];
+                h[i] = avg / 5f;
+            }
         }
-
-        mesh.vertices = verts;
-
-        if (recalcNormalsAfterDeform)
-        {
-            mesh.RecalculateNormals();
-            mesh.RecalculateBounds();
-        }
-
-        var mc = mf.GetComponent<MeshCollider>();
-        if (mc == null) mc = mf.gameObject.AddComponent<MeshCollider>();
-        mc.sharedMesh = null;
-        mc.sharedMesh = mesh;
     }
 
-    private void TryApplyGroundMaterial(GameObject tile, Material mat)
+    private float SampleHeightGrid(float gx, float gz)
     {
-        if (mat == null) return;
-        var r = tile.GetComponentInChildren<Renderer>();
-        if (r != null) r.sharedMaterial = mat;
+        var biome = profile.biome;
+
+        if (profile.useDomainWarp)
+        {
+            float wx = (Mathf.PerlinNoise(_offX + gx * profile.warpScale, _offZ + gz * profile.warpScale) - 0.5f) * 2f;
+            float wz = (Mathf.PerlinNoise(_offX + 999f + gx * profile.warpScale, _offZ + 999f + gz * profile.warpScale) - 0.5f) * 2f;
+            gx += wx * profile.warpStrength;
+            gz += wz * profile.warpStrength;
+        }
+
+        float large = Mathf.PerlinNoise(_offX + gx * profile.largeScale, _offZ + gz * profile.largeScale);
+        float hLarge = (large - 0.5f) * 2f * profile.largeAmp * Mathf.Max(0.001f, biome.largeAmpMultiplier);
+
+        float ridgeBase = Mathf.PerlinNoise(_offX + 2000f + gx * profile.ridgeScale, _offZ + 2000f + gz * profile.ridgeScale);
+        float ridge = 1f - Mathf.Abs(ridgeBase * 2f - 1f);
+        float hRidge = (ridge - 0.5f) * 2f * profile.ridgeAmp * Mathf.Max(0.001f, biome.ridgeAmpMultiplier);
+
+        float detail = Mathf.PerlinNoise(_offX + 4000f + gx * profile.detailScale, _offZ + 4000f + gz * profile.detailScale);
+        float hDetail = (detail - 0.5f) * 2f * profile.detailAmp * Mathf.Max(0.001f, biome.detailAmpMultiplier);
+
+        float valleyMap = Mathf.PerlinNoise(_offX + 6000f + gx * profile.valleyScale, _offZ + 6000f + gz * profile.valleyScale);
+        float valley = Mathf.Pow(valleyMap, 2.2f);
+        float valleyDrop = Mathf.Lerp(0f, profile.largeAmp * 0.9f, profile.valleyStrength) * (1f - valley);
+
+        float h = hLarge + hRidge + hDetail - valleyDrop;
+
+        if (profile.heightStep > 0.0001f)
+            h = Mathf.Round(h / profile.heightStep) * profile.heightStep;
+
+        return h;
     }
 
     // ----------------------------
@@ -369,42 +571,46 @@ public class MapGenerator : MonoBehaviour
     // ----------------------------
     private void SpawnSinglePOI()
     {
-        GameObject[] poiPrefabs = (poiPrefabsOverride != null && poiPrefabsOverride.Length > 0)
-            ? poiPrefabsOverride
-            : biome.poiPrefabs;
+        GameObject[] poiPrefabs = (profile.poiPrefabsOverride != null && profile.poiPrefabsOverride.Length > 0)
+            ? profile.poiPrefabsOverride
+            : profile.biome.poiPrefabs;
 
         if (!HasAtLeastOne(poiPrefabs))
             return;
 
-        float spacingX = autoSpacingFromPrefab ? _tileFootprintX : 10f;
-        float spacingZ = autoSpacingFromPrefab ? _tileFootprintZ : 10f;
+        float tileSize = profile.tileSize;
 
         var poi = poiPrefabs[_rng.Next(0, poiPrefabs.Length)];
 
-        for (int attempt = 0; attempt < Mathf.Max(1, poiPlacementAttempts); attempt++)
+        for (int attempt = 0; attempt < Mathf.Max(1, profile.poiPlacementAttempts); attempt++)
         {
-            int tx = _rng.Next(0, width);
-            int tz = _rng.Next(0, height);
+            int tx = _rng.Next(0, profile.width);
+            int tz = _rng.Next(0, profile.height);
 
-            Vector3 tileBase = new Vector3(tx * spacingX, 0f, tz * spacingZ);
+            Vector3 tileBase = _mapOrigin + new Vector3(tx * tileSize, 0f, tz * tileSize);
 
-            float maxOffset = 0.35f * Mathf.Min(spacingX, spacingZ);
+            float maxOffset = 0.35f * tileSize;
             Vector2 offset2 = RandomInsideCircle(_rng, maxOffset);
 
             Vector3 pos = tileBase + new Vector3(offset2.x, 0f, offset2.y);
+
+            // Clamp inside centered map bounds
+            pos.x = Mathf.Clamp(pos.x, _mapOrigin.x, _mapOrigin.x + _mapWorldSizeX);
+            pos.z = Mathf.Clamp(pos.z, _mapOrigin.z, _mapOrigin.z + _mapWorldSizeZ);
+
             pos = SnapToTerrainY(pos, 0f);
 
-            // Avoid overlapping other reserved zones
-            if (IsInsideReserved(pos, poiReserveRadius))
+            if (IsInsideReserved(pos, profile.poiReserveRadius))
                 continue;
 
             var go = Instantiate(poi, pos, Quaternion.Euler(0f, NextFloat(_rng, 0f, 360f), 0f), _root);
+
             if (autoPivotCorrection)
                 ApplyAutoPivotCorrection(go, pos.y);
 
-            _reservedZones.Add(new ReservedZone(pos, poiReserveRadius));
+            _reservedZones.Add(new ReservedZone(pos, profile.poiReserveRadius));
 
-            Debug.Log($"Spawned POI '{poi.name}' at {pos} radius={poiReserveRadius}");
+            Debug.Log($"Spawned POI '{poi.name}' at {pos} radius={profile.poiReserveRadius}");
             return;
         }
 
@@ -423,11 +629,11 @@ public class MapGenerator : MonoBehaviour
     }
 
     // ----------------------------
-    // Environment (variation + reserved zones)
+    // Environment spawning (per-tile RNG, same concept as before)
     // ----------------------------
     private void SpawnEnvironmentEveryTile()
     {
-        if (biome == null) return;
+        var biome = profile.biome;
 
         bool hasEnv =
             HasAtLeastOne(biome.treePrefabs) ||
@@ -437,17 +643,16 @@ public class MapGenerator : MonoBehaviour
         if (!hasEnv)
             return;
 
-        float spacingX = autoSpacingFromPrefab ? _tileFootprintX : 10f;
-        float spacingZ = autoSpacingFromPrefab ? _tileFootprintZ : 10f;
+        float tileSize = profile.tileSize;
 
-        for (int z = 0; z < height; z++)
+        for (int z = 0; z < profile.height; z++)
         {
-            for (int x = 0; x < width; x++)
+            for (int x = 0; x < profile.width; x++)
             {
                 var tileRng = MakeTileRng(x, z, 101);
 
-                Vector3 tileBase = new Vector3(x * spacingX, 0f, z * spacingZ);
-                Vector3 center = GetTileSpawnCenter(tileBase, tileRng);
+                Vector3 tileBase = _mapOrigin + new Vector3(x * tileSize, 0f, z * tileSize);
+                Vector3 center = GetTileSpawnCenter(tileBase, tileRng, tileSize);
 
                 // Per-tile variation
                 var theme = RollTileTheme(tileRng);
@@ -464,7 +669,7 @@ public class MapGenerator : MonoBehaviour
                     GameObject prefab = PickEnvPrefabThemed(tileRng, theme);
                     if (prefab == null) break;
 
-                    Vector2 offset = RandomPointWithMinSeparation(tileRng, _envRadiusWorld, used, _minSepWorld, placementAttempts);
+                    Vector2 offset = RandomPointWithMinSeparation(tileRng, _envRadiusWorld, used, _minSepWorld, profile.placementAttempts);
                     Vector3 pos = center + new Vector3(offset.x, 0f, offset.y);
                     pos = SnapToTerrainY(pos, 0f);
 
@@ -473,6 +678,11 @@ public class MapGenerator : MonoBehaviour
                         continue;
 
                     var go = Instantiate(prefab, pos, Quaternion.Euler(0f, NextFloat(tileRng, 0f, 360f), 0f), _envRoot);
+
+                    // Make sure env objects are NOT on Ground layer
+                    int envLayer = LayerMask.NameToLayer("Default"); // or "Environment" if you create it
+                    if (envLayer != -1)
+                        SetLayerRecursively(go, envLayer);
 
                     if (autoPivotCorrection)
                         ApplyAutoPivotCorrection(go, pos.y);
@@ -492,20 +702,20 @@ public class MapGenerator : MonoBehaviour
 
     private int RollSpawnCount(System.Random r)
     {
-        int baseCount = Mathf.Max(envSpawnsPerTileMin, 0);
+        int baseCount = Mathf.Max(profile.envSpawnsPerTileMin, 0);
         int delta = r.Next(-2, 4); // -2..+3
         return Mathf.Max(0, baseCount + delta);
     }
 
     private GameObject PickEnvPrefabThemed(System.Random r, TileTheme theme)
     {
-        var trees = biome.treePrefabs;
-        var rocks = biome.rockPrefabs;
-        var bushes = biome.bushPrefabs;
+        var trees = profile.biome.treePrefabs;
+        var rocks = profile.biome.rockPrefabs;
+        var bushes = profile.biome.bushPrefabs;
 
         int wTrees = (theme == TileTheme.TreesHeavy) ? 6 : 3;
         int wRocks = (theme == TileTheme.RocksHeavy) ? 6 : 3;
-        int wBush = (theme == TileTheme.Clearing) ? 1 : 2;
+        int wBush  = (theme == TileTheme.Clearing) ? 1 : 2;
 
         if (theme == TileTheme.Clearing)
         {
@@ -535,20 +745,9 @@ public class MapGenerator : MonoBehaviour
         return HasAtLeastOne(bushes) ? bushes[r.Next(0, bushes.Length)] : null;
     }
 
-    private void ApplyAutoPivotCorrection(GameObject go, float groundY)
-    {
-        var rends = go.GetComponentsInChildren<Renderer>();
-        if (rends == null || rends.Length == 0) return;
-
-        Bounds b = rends[0].bounds;
-        for (int i = 1; i < rends.Length; i++)
-            b.Encapsulate(rends[i].bounds);
-
-        float bottomY = b.min.y;
-        float delta = groundY - bottomY;
-        go.transform.position += new Vector3(0f, delta, 0f);
-    }
-
+    // ----------------------------
+    // Ground snapping / pivot correction
+    // ----------------------------
     private Vector3 SnapToTerrainY(Vector3 worldPos, float extraYOffset)
     {
         if (!useRaycastGrounding)
@@ -560,15 +759,49 @@ public class MapGenerator : MonoBehaviour
 
         Vector3 rayStart = new Vector3(worldPos.x, groundRaycastStartHeight, worldPos.z);
 
-        if (Physics.Raycast(rayStart, Vector3.down, out RaycastHit hit, groundRaycastStartHeight * 2f, groundLayerMask))
+        if (Physics.Raycast(rayStart, Vector3.down, out RaycastHit hit,
+                groundRaycastStartHeight * 2f, groundLayerMask, QueryTriggerInteraction.Ignore))
         {
             worldPos.y = hit.point.y + extraYOffset + groundExtraOffset;
             return worldPos;
         }
 
+        // Fallback
         float fallback = SampleHeightWorld(worldPos.x, worldPos.z);
         worldPos.y = fallback + extraYOffset + groundExtraOffset;
         return worldPos;
+    }
+
+    private void ApplyAutoPivotCorrection(GameObject go, float groundY)
+    {
+        // Prefer collider bounds if available
+        var cols = go.GetComponentsInChildren<Collider>();
+        if (cols != null && cols.Length > 0)
+        {
+            Bounds b = cols[0].bounds;
+            for (int i = 1; i < cols.Length; i++) b.Encapsulate(cols[i].bounds);
+
+            float bottomY = b.min.y;
+            go.transform.position += new Vector3(0f, groundY - bottomY, 0f);
+            return;
+        }
+
+        // Fallback to renderer bounds
+        var rends = go.GetComponentsInChildren<Renderer>();
+        if (rends == null || rends.Length == 0) return;
+
+        Bounds rb = rends[0].bounds;
+        for (int i = 1; i < rends.Length; i++) rb.Encapsulate(rends[i].bounds);
+
+        float rBottomY = rb.min.y;
+        go.transform.position += new Vector3(0f, groundY - rBottomY, 0f);
+    }
+
+    private void SetLayerRecursively(GameObject go, int layer)
+    {
+        go.layer = layer;
+        foreach (Transform child in go.transform)
+            SetLayerRecursively(child.gameObject, layer);
     }
 
     // ----------------------------
@@ -576,31 +809,18 @@ public class MapGenerator : MonoBehaviour
     // ----------------------------
     private void ComputeEffectiveRadii()
     {
-        float halfMin = 0.5f * Mathf.Min(_tileFootprintX, _tileFootprintZ);
+        float halfTile = 0.5f * Mathf.Max(0.01f, profile.tileSize);
 
-        if (useNormalizedRadii)
-        {
-            _envRadiusWorld = envScatterRadius * halfMin;
-            _jitterRadiusWorld = perTileJitterRadius * halfMin;
-            _minSepWorld = minSeparationInTile * halfMin;
-        }
-        else
-        {
-            _envRadiusWorld = envScatterRadius;
-            _jitterRadiusWorld = perTileJitterRadius;
-            _minSepWorld = minSeparationInTile;
-        }
-
-        _envRadiusWorld = Mathf.Max(0.01f, _envRadiusWorld);
-        _jitterRadiusWorld = Mathf.Max(0f, _jitterRadiusWorld);
-        _minSepWorld = Mathf.Max(0f, _minSepWorld);
+        _envRadiusWorld = Mathf.Max(0.01f, profile.envScatterRadius * halfTile);
+        _jitterRadiusWorld = Mathf.Max(0f, profile.perTileJitterRadius * halfTile);
+        _minSepWorld = Mathf.Max(0f, profile.minSeparationInTile * halfTile);
     }
 
     private System.Random MakeTileRng(int x, int z, int salt)
     {
         unchecked
         {
-            int h = seed;
+            int h = profile.seed;
             h = h * 486187739 + x * 73856093;
             h = h * 486187739 + z * 19349663;
             h = h * 486187739 + salt * 83492791;
@@ -617,10 +837,16 @@ public class MapGenerator : MonoBehaviour
         return new Vector2(Mathf.Cos(ang) * rr, Mathf.Sin(ang) * rr);
     }
 
-    private Vector3 GetTileSpawnCenter(Vector3 tileBaseWorld, System.Random tileRng)
+    private Vector3 GetTileSpawnCenter(Vector3 tileBaseWorld, System.Random tileRng, float tileSize)
     {
         Vector2 jitter = RandomInsideCircle(tileRng, _jitterRadiusWorld);
-        return tileBaseWorld + new Vector3(jitter.x, 0f, jitter.y);
+        Vector3 p = tileBaseWorld + new Vector3(jitter.x, 0f, jitter.y);
+
+        // Clamp within tile bounds loosely (optional safety)
+        p.x = Mathf.Clamp(p.x, tileBaseWorld.x, tileBaseWorld.x + tileSize);
+        p.z = Mathf.Clamp(p.z, tileBaseWorld.z, tileBaseWorld.z + tileSize);
+
+        return SnapToTerrainY(p, 0f);
     }
 
     private Vector2 RandomPointWithMinSeparation(System.Random r, float radius, List<Vector2> used, float minDist, int attempts)
@@ -642,40 +868,98 @@ public class MapGenerator : MonoBehaviour
         used.Add(fallback);
         return fallback;
     }
+    
+  private System.Collections.IEnumerator SnapPlayerAfterPhysics()
+    {
+        Debug.Log("SnapPlayerAfterPhysics ENTER");
 
-    private bool HasAtLeastOne(GameObject[] arr) => arr != null && arr.Length > 0;
+        if (player == null || profile == null) 
+            yield break;
+
+        Rigidbody rb = player.GetComponent<Rigidbody>();
+        Collider playerCol = player.GetComponent<Collider>();
+
+        try 
+        {
+            // 1. Wait for physics to stabilize and mesh collider to "cook"
+            yield return new WaitForSeconds(0.1f); 
+            yield return new WaitForFixedUpdate();
+            Physics.SyncTransforms();
+
+            // Freeze while we move it to prevent falling through the floor
+            if (rb != null) 
+            {
+                rb.isKinematic = true;
+                rb.detectCollisions = false;
+            }
+
+            // Get spawn XZ in WORLD coordinates
+            Vector3 spawnXZ = GetSpawnXZWorld();
+            float bottomOffset = (playerCol != null) ? playerCol.bounds.extents.y : 0.5f;
+
+            Vector3 rayStart = new Vector3(spawnXZ.x, spawnRayStartHeight, spawnXZ.z);
+            
+            // Raycast down to find the ground
+            if (Physics.Raycast(rayStart, Vector3.down, out RaycastHit hit, spawnRayStartHeight * 2f, groundLayerMask)) 
+            {
+                player.position = hit.point + Vector3.up * (bottomOffset + 0.1f);
+                Debug.Log($"Snapped to raycast hit point: {hit.point}");
+            } 
+            else 
+            {
+                // Fallback to mathematical sampling if raycast misses
+                float h = SampleHeightWorld(spawnXZ.x, spawnXZ.z);
+                player.position = new Vector3(spawnXZ.x, h + bottomOffset + 0.1f, spawnXZ.z);
+                Debug.LogWarning($"Raycast missed! Falling back to height sampling: {h}");
+            }
+            
+            Physics.SyncTransforms();
+            
+            // Wait one final fixed update for the transform to register
+            yield return new WaitForFixedUpdate(); 
+        }
+        finally
+        {
+            if (rb != null)
+            {
+                rb.isKinematic = false;
+                rb.detectCollisions = true;
+                rb.useGravity = true;
+
+                rb.linearVelocity = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+
+                rb.WakeUp();
+            }
+        }
+
+    }    private bool HasAtLeastOne(GameObject[] arr) => arr != null && arr.Length > 0;
 
     // ----------------------------
-    // Clear old (fast)
+    // Clear old
     // ----------------------------
     private void ClearOld()
     {
-        // Destroy previous root directly instead of scanning the entire scene
+        // If we have a direct reference, destroy it
         if (_root != null)
         {
-#if UNITY_EDITOR
-            if (!Application.isPlaying) DestroyImmediate(_root.gameObject);
-            else Destroy(_root.gameObject);
-#else
-            Destroy(_root.gameObject);
-#endif
+            if (Application.isPlaying) Destroy(_root.gameObject);
+            else DestroyImmediate(_root.gameObject);
             _root = null;
         }
 
-        // Also clean up any lingering generated objects by name (safety net)
-        // This is much smaller than scanning all transforms; you can remove later.
-        var roots = GameObject.FindObjectsOfType<Transform>();
-        foreach (var t in roots)
+        // Safety net: Only find and destroy other maps if we are NOT in Play Mode
+        // or if we are explicitly calling a full regeneration.
+        if (!Application.isPlaying)
         {
-            if (t.parent != null) continue; // only scene roots
-            if (!t.name.StartsWith("GeneratedMap_")) continue;
+            var roots = GameObject.FindObjectsByType<Transform>(FindObjectsSortMode.None);
+            foreach (var t in roots)
+            {
+                if (t == null || t.parent != null) continue;
+                if (!t.name.StartsWith("GeneratedMap_")) continue;
 
-#if UNITY_EDITOR
-            if (!Application.isPlaying) DestroyImmediate(t.gameObject);
-            else Destroy(t.gameObject);
-#else
-            Destroy(t.gameObject);
-#endif
+                DestroyImmediate(t.gameObject);
+            }
         }
     }
 }
